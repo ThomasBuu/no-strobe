@@ -35,6 +35,7 @@ const VERIFY_RATIO: f64 = 0.35;
 /// Temporal banding (relative to the mean luma) under this is noise, not flicker.
 const TEMPORAL_FLOOR: f64 = 0.015;
 const SCAN_RATIO: f64 = 1.18;
+const SCAN_LINEAR_US: f64 = 1000.0;
 const MIN_HZ: f64 = 100.0;
 const MAX_HZ: f64 = 5000.0;
 /// Frames to spend on one frame rate before dropping to the next: the profile has to be read
@@ -94,6 +95,10 @@ pub struct PwmController {
     /// shortest k/f. Every multiple of the period cancels the flicker, and a longer one lets
     /// the ISO come down by the same factor.
     shutter_fraction: f64,
+    /// Shortest exposure worth searching with: below it the ISO the brightness needs is too high.
+    min_exp_floor: f64,
+    /// Longest exposure that does not overexpose (brightness budget / lowest ISO); 0 = unknown.
+    max_exp_ceiling: f64,
     /// Banding metric summed over the frames of the current trial (averaged at its end).
     trial_acc: f64,
     /// Profiles of the current trial (same exposure): the flicker metric is temporal.
@@ -114,7 +119,7 @@ pub struct PwmController {
     period_rows: f64,
     period_conf: f64,
     f_from_rows: bool,
-    scan_i: usize,
+    scan_e: f64,
     scan_n: usize,
     scan_res: Vec<(f64, f64)>,
     scan_frames: Vec<Vec<f64>>,
@@ -149,6 +154,8 @@ impl PwmController {
             flicker_seen: false,
             rechecking: false,
             shutter_fraction: 0.0,
+            min_exp_floor: 0.0,
+            max_exp_ceiling: 0.0,
             trial_acc: 0.0,
             trial_profiles: Vec::new(),
             temporal_max: 0.0,
@@ -165,7 +172,7 @@ impl PwmController {
             period_rows: 0.0,
             period_conf: 0.0,
             f_from_rows: false,
-            scan_i: 0,
+            scan_e: 0.0,
             scan_n: 0,
             scan_res: Vec::new(),
             scan_frames: Vec::new(),
@@ -203,6 +210,25 @@ impl PwmController {
 
     /// Ask for exposures near `fraction` of the frame time (on a multiple of the flicker period)
     /// once locked. 0 disables it.
+    /// Shortest exposure the search may use (the app passes brightness budget / ISO limit). Shorter
+    /// exposures need an ISO that makes the preview and the clip noisy, and the nulls of the
+    /// flicker repeat at every multiple of its period anyway, so nothing is lost by searching
+    /// from here upward.
+    pub fn set_min_exposure(&mut self, us: f64) {
+        self.min_exp_floor = us.max(0.0);
+    }
+
+    /// Longest exposure the scene allows: beyond it even the lowest ISO overexposes the frame.
+    pub fn set_max_exposure(&mut self, us: f64) {
+        self.max_exp_ceiling = us.max(0.0);
+    }
+
+    fn min_exp(&self) -> f64 {
+        // Never more than half of the room the search has, or the scan would have no range.
+        let floor = self.min_exp_floor.min(0.5 * self.exposure_cap());
+        self.limits.min_exposure_us.max(floor).min(self.exposure_cap())
+    }
+
     pub fn set_shutter_fraction(&mut self, fraction: f64) {
         self.shutter_fraction = fraction.clamp(0.0, 1.0);
     }
@@ -215,7 +241,13 @@ impl PwmController {
         }
         let frame_us = 1e6 / self.fps;
         let target = (self.shutter_fraction * frame_us).min(self.exposure_cap());
-        let k = (target * self.f_hz / 1e6).floor().max(1.0);
+        // The nearest multiple of the period to the wanted exposure, not the one below: with a
+        // wanted 16 ms and a 10 ms period, 20 ms keeps the ISO lower than 10 ms would. Never past
+        // what the frame can hold.
+        let mut k = (target * self.f_hz / 1e6).round().max(1.0);
+        while k > 1.0 && k * 1e6 / self.f_hz > self.exposure_cap() {
+            k -= 1.0;
+        }
         let e = k * 1e6 / self.f_hz;
         if e <= self.best_exposure * 1.5 {
             return false;
@@ -272,24 +304,27 @@ impl PwmController {
         self.flicker_seen = false;
         self.trial_profiles.clear();
         self.scan_window = None;
-        self.scan_i = 0;
+        self.scan_e = self.hill_min();
         self.scan_n = 0;
         self.scan_res.clear();
         self.scan_frames.clear();
         self.phase = Phase::Scan;
-        let e = self.scan_exposure(0);
+        let e = self.scan_e;
         self.emit(e, State::Search, 0.0)
     }
 
-    fn scan_exposure(&self, i: usize) -> f64 {
-        (self.hill_min() * SCAN_RATIO.powi(i as i32)).min(self.hill_cap())
+    /// Next exposure of the scan grid: log-spaced while that is finer than SCAN_LINEAR_US, then in
+    /// fixed steps, so that a flicker of a few hundred Hz still has several points per period when
+    /// the search starts at a long exposure.
+    fn scan_next(&self, e: f64) -> f64 {
+        (e + (e * (SCAN_RATIO - 1.0)).min(SCAN_LINEAR_US)).min(self.hill_cap())
     }
 
     /// Visit every exposure of a log grid (4 frames each, the first is stale), then climb from
     /// the deepest temporal minimum. A local descent from the middle wanders in the flat, noisy
     /// part of the metric; the scan sees all the nulls of the range at once.
     fn scan(&mut self, profile: &[f64]) -> crate::controller::Command {
-        let e = self.scan_exposure(self.scan_i);
+        let e = self.scan_e;
         self.scan_n += 1;
         if self.scan_n > 1 {
             self.scan_frames.push(profile.to_vec());
@@ -305,9 +340,8 @@ impl PwmController {
             self.scan_res.push((e, m));
         }
         if e < self.hill_cap() * 0.999 {
-            self.scan_i += 1;
-            let next = self.scan_exposure(self.scan_i);
-            return self.emit(next, State::Search, 0.0);
+            self.scan_e = self.scan_next(e);
+            return self.emit(self.scan_e, State::Search, 0.0);
         }
         // End of the grid.
         let hi = self.scan_res.iter().map(|r| r.1).fold(0.0f64, f64::max);
@@ -364,13 +398,13 @@ impl PwmController {
         if self.rechecking || self.line_rate_hz > 0.0 {
             self.exposure_cap()
         } else {
-            self.exposure_cap().min(1.2e6 / MIN_HZ)
+            self.exposure_cap().min((1.2e6 / MIN_HZ).max(self.min_exp() * 2.5))
         }
     }
 
     fn search(&mut self, profile: &[f64]) -> crate::controller::Command {
         if self.profiles.len() < PROFILE_KEEP {
-            return self.emit(self.limits.min_exposure_us, State::Search, 0.0);
+            return self.emit(self.min_exp(), State::Search, 0.0);
         }
         let mean = self.mean_profile();
         if self.line_rate_hz > 0.0 {
@@ -381,9 +415,9 @@ impl PwmController {
                     return self.emit(e, State::Search, self.confidence);
                 }
                 // No exposure in the device range fits: keep searching.
-                return self.emit(self.limits.min_exposure_us, State::Search, 0.0);
+                return self.emit(self.min_exp(), State::Search, 0.0);
             }
-            return self.emit(self.limits.min_exposure_us, State::Search, 0.0);
+            return self.emit(self.min_exp(), State::Search, 0.0);
         }
         // No row readout rate (iOS, high-speed): the frame time is known because the controller
         // sets the frame rate, so one row takes frame_us / rows. The banding period measured in
@@ -425,7 +459,7 @@ impl PwmController {
             self.fps_idx = self.fps_idx.saturating_sub(1);
             self.fps = self.limits.supported_fps[self.fps_idx];
         }
-        self.emit(self.limits.min_exposure_us, State::Search, 0.0)
+        self.emit(self.min_exp(), State::Search, 0.0)
     }
 
 
@@ -535,7 +569,7 @@ impl PwmController {
             self.f_hz = 0.0;
             self.confidence = 0.0;
             self.phase = Phase::Search;
-            return self.emit(self.limits.min_exposure_us, State::Search, 0.0);
+            return self.emit(self.min_exp(), State::Search, 0.0);
         }
         if self.line_rate_hz == 0.0 && self.hill_step < SWEEP_COARSE && self.f_hz == 0.0 {
             // Local banding minimum, but a coarse one (steps of ~5 %) can be a dip of the noise or
@@ -582,7 +616,7 @@ impl PwmController {
                 self.f_hz = 0.0;
                 self.confidence = 0.0;
                 self.phase = Phase::Search;
-                return self.emit(self.limits.min_exposure_us, State::Search, 0.0);
+                return self.emit(self.min_exp(), State::Search, 0.0);
             }
             // Same flicker, null moved: re-centre, staying at the locked exposure.
             self.hill_base = self.best_exposure;
@@ -601,7 +635,7 @@ impl PwmController {
             self.profiles.clear();
             self.phase = Phase::Recalib;
             // Banding is only readable with a short exposure.
-            return self.emit(self.limits.min_exposure_us, State::Search, self.confidence);
+            return self.emit(self.min_exp(), State::Search, self.confidence);
         }
         self.emit(self.best_exposure, State::Locked, self.confidence)
     }
@@ -721,7 +755,7 @@ impl PwmController {
 
     fn recalib(&mut self, _profile: &[f64]) -> crate::controller::Command {
         if self.profiles.len() < PROFILE_KEEP {
-            return self.emit(self.limits.min_exposure_us, State::Search, self.confidence);
+            return self.emit(self.min_exp(), State::Search, self.confidence);
         }
         let mean = self.mean_profile();
         if self.line_rate_hz > 0.0 {
@@ -732,7 +766,7 @@ impl PwmController {
                     return self.emit(e, State::Search, self.confidence);
                 }
                 self.phase = Phase::Search;
-                return self.emit(self.limits.min_exposure_us, State::Search, 0.0);
+                return self.emit(self.min_exp(), State::Search, 0.0);
             }
             // No readable flicker: the light stopped. Keep the last exposure.
             self.phase = Phase::Locked;
@@ -740,7 +774,7 @@ impl PwmController {
             return self.emit(self.best_exposure, State::Locked, self.confidence);
         }
         self.phase = Phase::Search;
-        self.emit(self.limits.min_exposure_us, State::Search, 0.0)
+        self.emit(self.min_exp(), State::Search, 0.0)
     }
 
     /// Start a hill climb at the largest `k / f` that fits the frame period.
@@ -792,16 +826,21 @@ impl PwmController {
     /// there without proving anything: a climb that drifts to the shortest exposure "finds"
     /// a minimum that is not one.
     fn hill_min(&self) -> f64 {
-        self.limits.min_exposure_us.max(1e6 / MAX_HZ).min(self.exposure_cap())
+        self.min_exp().max(1e6 / MAX_HZ).min(self.exposure_cap())
     }
 
     /// Longest exposure the frame can hold: a sensor accepts exposures far longer than one
     /// frame, but then stretches the frame duration and the frame rate collapses.
     fn exposure_cap(&self) -> f64 {
         let frame_us = 1e6 / self.fps;
-        self.limits
+        let mut cap = self
+            .limits
             .max_exposure_us
-            .min((frame_us - self.limits.sustain_us).max(self.limits.min_exposure_us))
+            .min((frame_us - self.limits.sustain_us).max(self.limits.min_exposure_us));
+        if self.max_exp_ceiling > 0.0 {
+            cap = cap.min(self.max_exp_ceiling.max(self.limits.min_exposure_us));
+        }
+        cap
     }
 
     fn emit(&mut self, exposure_us: f64, state: State, confidence: f64) -> crate::controller::Command {

@@ -185,6 +185,30 @@ pub extern "system" fn Java_dev_nostrobe_NsJni_nativeSeedPwm(
     ctrl.seed_lock(exposure_us, f_hz);
 }
 
+/// Shortest exposure worth searching with (brightness budget / ISO limit), microseconds.
+#[no_mangle]
+pub extern "system" fn Java_dev_nostrobe_NsJni_nativeSetMinExposure(
+    _env: JNIEnv,
+    _class: JClass,
+    handle: jlong,
+    us: jdouble,
+) {
+    let ctrl = unsafe { &mut *(handle as *mut PwmController) };
+    ctrl.set_min_exposure(us);
+}
+
+/// Longest exposure that does not overexpose (brightness budget / lowest ISO), microseconds.
+#[no_mangle]
+pub extern "system" fn Java_dev_nostrobe_NsJni_nativeSetMaxExposure(
+    _env: JNIEnv,
+    _class: JClass,
+    handle: jlong,
+    us: jdouble,
+) {
+    let ctrl = unsafe { &mut *(handle as *mut PwmController) };
+    ctrl.set_max_exposure(us);
+}
+
 /// Wanted exposure as a fraction of the frame time once locked (see `PwmController::set_shutter_fraction`).
 #[no_mangle]
 pub extern "system" fn Java_dev_nostrobe_NsJni_nativeSetShutterFraction(

@@ -43,6 +43,8 @@ object NsJni {
     private external fun nativeDestroyPwm(handle: Long)
     private external fun nativeSeedPwm(handle: Long, exposureUs: Double, fHz: Double)
     private external fun nativeSetShutterFraction(handle: Long, fraction: Double)
+    private external fun nativeSetMinExposure(handle: Long, us: Double)
+    private external fun nativeSetMaxExposure(handle: Long, us: Double)
     private external fun nativeSyntheticProfile(
         exposureUs: Double, fHz: Double, phaseCycles: Double, duty: Double, lineRateHz: Double, rows: Int,
     ): DoubleArray
@@ -140,6 +142,16 @@ object NsJni {
         /** Prefer exposures near this fraction of the frame time (0.5 = 180 degree shutter). */
         fun setShutterFraction(fraction: Double) {
             nativeSetShutterFraction(handle, fraction)
+        }
+
+        /** Shortest exposure the search uses: brightness budget / ISO limit (keeps the preview clean). */
+        fun setMinExposure(us: Double) {
+            nativeSetMinExposure(handle, us)
+        }
+
+        /** Longest exposure that does not overexpose: brightness budget / lowest ISO. */
+        fun setMaxExposure(us: Double) {
+            nativeSetMaxExposure(handle, us)
         }
 
         /** Start locked on a flicker found earlier, instead of searching again. */

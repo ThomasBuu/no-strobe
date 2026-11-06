@@ -21,8 +21,10 @@ class AspectFrameLayout @JvmOverloads constructor(
             super.onMeasure(widthSpec, heightSpec)
             return
         }
-        val m = resources.displayMetrics
-        val ratio = if (m.widthPixels > m.heightPixels) 16f / 9f else 9f / 16f  // width / height
+        // The window's own orientation (the display metrics of a foldable's inner screen said the
+        // opposite and squashed the picture into a landscape box while the content was upright).
+        val landscape = resources.configuration.orientation == android.content.res.Configuration.ORIENTATION_LANDSCAPE
+        val ratio = if (landscape) 16f / 9f else 9f / 16f  // width / height
         var w = maxW
         var h = (maxW / ratio).toInt()
         if (h > maxH) {

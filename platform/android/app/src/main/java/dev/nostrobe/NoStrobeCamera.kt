@@ -740,6 +740,12 @@ class NoStrobeCamera(
                 // (up to nearly a full frame): more motion blur, much less noise.
                 val frameUs = 1e6 / chosenFps
                 pwm!!.setShutterFraction((needUs / frameUs).coerceIn(SHUTTER_FRACTION, 0.95))
+                if (budgetUsIso > 0.0) {
+                    // The search stays above the exposure where the ISO would pass ISO_SEARCH_MAX
+                    // (a preview at ISO 17000 is pink noise), and below the one that overexposes.
+                    pwm!!.setMinExposure(budgetUsIso * Math.pow(2.0, evBias.toDouble()) / ISO_SEARCH_MAX)
+                    pwm!!.setMaxExposure(budgetUsIso * Math.pow(2.0, evBias.toDouble()) / isoMin)
+                }
                 if (seedExposureUs > 0.0 && seedHz > 0.0) {
                     Log.i(TAG, "starting locked: %.0f us at %.1f Hz".format(seedExposureUs, seedHz))
                     pwm!!.seed(seedExposureUs, seedHz)
@@ -934,6 +940,8 @@ class NoStrobeCamera(
         const val LOCK_GRACE_MS = 4_000L
         /** ISO above which a longer exposure is preferred (noise matters more than blur). */
         const val ISO_SOFT_MAX = 3_200.0
+        /** ISO the search may use: beyond it the preview and the probes are mostly noise. */
+        const val ISO_SEARCH_MAX = 1_600.0
         /** Lowest frame rate the dim-scene rule goes down to (a clip below this is not a video). */
         const val MIN_DIM_FPS = 24.0
         /** Auto-exposure runs this long before an open-loop recording takes over. */
