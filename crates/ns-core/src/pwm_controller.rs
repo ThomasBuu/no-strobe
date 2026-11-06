@@ -34,6 +34,7 @@ const MIN_LUMA: f64 = 0.02;
 const VERIFY_RATIO: f64 = 0.35;
 /// Temporal banding (relative to the mean luma) under this is noise, not flicker.
 const TEMPORAL_FLOOR: f64 = 0.015;
+const SCAN_RATIO: f64 = 1.18;
 const MIN_HZ: f64 = 100.0;
 const MAX_HZ: f64 = 5000.0;
 /// Frames to spend on one frame rate before dropping to the next: the profile has to be read
@@ -55,6 +56,8 @@ enum Phase {
     Recalib,
     /// Blind lock candidate: probe 25 % above and below to confirm the null is deep.
     Verify,
+    /// Blind scan of the whole exposure range on a log grid, then pick the deepest null.
+    Scan,
     Locked,
 }
 
@@ -111,6 +114,10 @@ pub struct PwmController {
     period_rows: f64,
     period_conf: f64,
     f_from_rows: bool,
+    scan_i: usize,
+    scan_n: usize,
+    scan_res: Vec<(f64, f64)>,
+    scan_frames: Vec<Vec<f64>>,
 }
 
 impl PwmController {
@@ -156,6 +163,10 @@ impl PwmController {
             period_rows: 0.0,
             period_conf: 0.0,
             f_from_rows: false,
+            scan_i: 0,
+            scan_n: 0,
+            scan_res: Vec::new(),
+            scan_frames: Vec::new(),
         }
     }
 
@@ -244,6 +255,7 @@ impl PwmController {
             Phase::Search => self.search(profile),
             Phase::Hill => self.hill(profile),
             Phase::Verify => self.verify(profile),
+            Phase::Scan => self.scan(profile),
             Phase::Recalib => self.recalib(profile),
             Phase::Locked => self.locked(profile),
         }
@@ -253,19 +265,80 @@ impl PwmController {
     fn start_blind_sweep(&mut self) -> crate::controller::Command {
         self.f_hz = 0.0;
         self.confidence = 0.0;
-        self.hill_base = (self.hill_min() * self.hill_cap()).sqrt();
-        self.hill_exposure = self.hill_base;
-        self.hill_step = 1.25;
+        self.flicker_seen = false;
+        self.trial_profiles.clear();
+        self.scan_i = 0;
+        self.scan_n = 0;
+        self.scan_res.clear();
+        self.scan_frames.clear();
+        self.phase = Phase::Scan;
+        let e = self.scan_exposure(0);
+        self.emit(e, State::Search, 0.0)
+    }
+
+    fn scan_exposure(&self, i: usize) -> f64 {
+        (self.hill_min() * SCAN_RATIO.powi(i as i32)).min(self.hill_cap())
+    }
+
+    /// Visit every exposure of a log grid (4 frames each, the first is stale), then climb from
+    /// the deepest temporal minimum. A local descent from the middle wanders in the flat, noisy
+    /// part of the metric; the scan sees all the nulls of the range at once.
+    fn scan(&mut self, profile: &[f64]) -> crate::controller::Command {
+        let e = self.scan_exposure(self.scan_i);
+        self.scan_n += 1;
+        if self.scan_n > 1 {
+            self.scan_frames.push(profile.to_vec());
+        }
+        if self.scan_n < 3 {
+            return self.emit(e, State::Search, 0.0);
+        }
+        let m = pwm::temporal_banding(&self.scan_frames);
+        let luma = profile.iter().sum::<f64>() / profile.len().max(1) as f64;
+        self.scan_frames.clear();
+        self.scan_n = 0;
+        if luma >= MIN_LUMA {
+            self.scan_res.push((e, m));
+        }
+        if e < self.hill_cap() * 0.999 {
+            self.scan_i += 1;
+            let next = self.scan_exposure(self.scan_i);
+            return self.emit(next, State::Search, 0.0);
+        }
+        // End of the grid.
+        let hi = self.scan_res.iter().map(|r| r.1).fold(0.0f64, f64::max);
+        // Absolute modulation (relative one times the exposure) is |sin(pi f e)| / (pi f): bounded,
+        // and it vanishes only at the nulls (and at e -> 0, an endpoint, never an interior minimum).
+        let amp: Vec<f64> = self.scan_res.iter().map(|r| r.1 * r.0).collect();
+        let mut best_e = 0.0;
+        let mut best_ratio = f64::INFINITY;
+        for i in 1..amp.len().saturating_sub(1) {
+            let nb = amp[i - 1].max(amp[i + 1]);
+            if amp[i] <= amp[i - 1] && amp[i] <= amp[i + 1] && nb > 0.0 {
+                let ratio = amp[i] / nb;
+                if ratio < best_ratio {
+                    best_ratio = ratio;
+                    best_e = self.scan_res[i].0;
+                }
+            }
+        }
+        if self.scan_res.len() < 5 || hi < TEMPORAL_FLOOR || best_ratio > 0.7 {
+            // Nothing stands out: no flicker, or too dark. Scan again.
+            return self.start_blind_sweep();
+        }
+        self.flicker_seen = true;
+        self.confidence = 0.3;
+        self.hill_base = best_e;
+        self.hill_exposure = best_e;
+        self.hill_step = 1.04;
         self.probe = 0;
         self.probe_res = [0.0; 3];
-        self.flicker_seen = false;
         self.frames_since_check = 0;
         self.trial_acc = 0.0;
         self.trial_n = 0;
         self.trial_profiles.clear();
         self.temporal_max = 0.0;
         self.phase = Phase::Hill;
-        self.emit(self.hill_exposure, State::Search, 0.0)
+        self.emit(self.hill_exposure, State::Search, self.confidence)
     }
 
     /// Longest exposure the climb may use. Before the flicker is found it stays near one period of

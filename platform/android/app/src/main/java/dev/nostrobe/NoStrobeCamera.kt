@@ -913,7 +913,7 @@ class NoStrobeCamera(
 
     private companion object {
         const val TAG = "nostrobe"
-        const val PROBE_MS = 6_000L
+        const val PROBE_MS = 30_000L
         /** Longer while the controller reports a real flicker it is still homing in on. */
         const val PROBE_SIGNAL_MS = 40_000L
         const val REST_MS = 12_000L
