@@ -51,7 +51,10 @@ jobs:
         with:
           distribution: temurin
           java-version: '17'
-      - uses: android-actions/setup-android@v3
+      # The runner image ships the Android SDK (ANDROID_HOME) with cmdline-tools/latest,
+      # platform 34 and build-tools. android-actions/setup-android@v3 was tried and failed:
+      # it downloads cmdline-tools 16.0 and then asks sdkmanager for the legacy 'tools'
+      # package, which is no longer in the SDK repository ("Failed to find package 'tools'").
       - name: Install the NDK
         run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "ndk;$NDK_VERSION"
       - run: cargo install cargo-ndk --locked
