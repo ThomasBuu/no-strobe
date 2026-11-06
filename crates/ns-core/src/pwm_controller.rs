@@ -110,6 +110,7 @@ pub struct PwmController {
     search_frames: usize,
     period_rows: f64,
     period_conf: f64,
+    f_from_rows: bool,
 }
 
 impl PwmController {
@@ -154,6 +155,7 @@ impl PwmController {
             search_frames: 0,
             period_rows: 0.0,
             period_conf: 0.0,
+            f_from_rows: false,
         }
     }
 
@@ -312,6 +314,7 @@ impl PwmController {
             self.period_conf = conf;
             if conf > 0.3 && pwm::banding_amplitude(profile) > NOISE_FLOOR {
                 self.f_hz = 1e6 / (p * frame_us / rows);
+                self.f_from_rows = true;
                 self.confidence = conf;
                 self.flicker_seen = true;
                 self.search_frames = 0;
@@ -523,8 +526,12 @@ impl PwmController {
         // banding is at maximum. A +-25 % probe can land on another null (0.25*k*f is a multiple
         // of T when k is a multiple of 4), and then the deep test compares two nulls and says
         // nothing.
-        let off = if self.f_hz > 0.0 {
+        // A frequency read from the banding period in rows (spatial, scene structure included) can
+        // be wrong, so half its period proves nothing: probe a fixed non-harmonic distance.
+        let off = if self.f_hz > 0.0 && !self.f_from_rows {
             5e5 / self.f_hz
+        } else if self.f_from_rows {
+            self.hill_base * 0.37
         } else {
             self.hill_base * 0.25
         };
@@ -579,6 +586,7 @@ impl PwmController {
             // climb continues from here, so k is not assumed to be 1.
             self.verify_coarse = false;
             self.f_hz = 1e6 / self.hill_base;
+            self.f_from_rows = false;
             self.confidence = 0.5;
             self.hill_step = 1.02;
             self.probe = 0;
@@ -604,6 +612,7 @@ impl PwmController {
         }
         // Not a null: forget this frequency and keep climbing from the lower far probe.
         self.verify_coarse = false;
+        self.f_from_rows = false;
         self.f_hz = 0.0;
         self.confidence = 0.3;
         self.hill_step = 1.25;
