@@ -44,14 +44,14 @@
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
             android:layout_gravity="top|start"
-            android:layout_margin="10dp"
+            android:layout_margin="12dp"
             android:background="@drawable/bg_chip"
-            android:fontFamily="monospace"
+            android:fontFamily="sans-serif-medium"
             android:maxLines="2"
-            android:paddingStart="10dp"
-            android:paddingTop="5dp"
-            android:paddingEnd="10dp"
-            android:paddingBottom="5dp"
+            android:paddingStart="14dp"
+            android:paddingTop="7dp"
+            android:paddingEnd="14dp"
+            android:paddingBottom="7dp"
             android:text="search"
             android:textColor="#FFFFFFFF"
             android:textSize="12sp" />
@@ -60,15 +60,15 @@
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
             android:layout_gravity="top|end"
-            android:layout_marginTop="46dp"
-            android:layout_marginEnd="6dp"
+            android:layout_marginTop="12dp"
+            android:layout_marginEnd="12dp"
             android:orientation="vertical">
 
         <TextView
             android:id="@+id/gridToggle"
-            android:layout_width="56dp"
-            android:layout_height="56dp"
-            android:layout_margin="4dp"
+            android:layout_width="52dp"
+            android:layout_height="52dp"
+            android:layout_margin="3dp"
             android:background="@drawable/bg_tool"
             android:clickable="true"
             android:drawableTint="@color/icon_tint"
@@ -82,9 +82,9 @@
 
         <TextView
             android:id="@+id/timer"
-            android:layout_width="56dp"
-            android:layout_height="56dp"
-            android:layout_margin="4dp"
+            android:layout_width="52dp"
+            android:layout_height="52dp"
+            android:layout_margin="3dp"
             android:background="@drawable/bg_tool"
             android:clickable="true"
             android:drawableTint="@color/icon_tint"
@@ -98,9 +98,9 @@
 
         <TextView
             android:id="@+id/mic"
-            android:layout_width="56dp"
-            android:layout_height="56dp"
-            android:layout_margin="4dp"
+            android:layout_width="52dp"
+            android:layout_height="52dp"
+            android:layout_margin="3dp"
             android:background="@drawable/bg_tool"
             android:clickable="true"
             android:drawableTint="@color/icon_tint"
@@ -114,9 +114,9 @@
 
         <TextView
             android:id="@+id/evToggle"
-            android:layout_width="56dp"
-            android:layout_height="56dp"
-            android:layout_margin="4dp"
+            android:layout_width="52dp"
+            android:layout_height="52dp"
+            android:layout_margin="3dp"
             android:background="@drawable/bg_tool"
             android:clickable="true"
             android:drawableTint="@color/icon_tint"
@@ -205,51 +205,53 @@
 
         <FrameLayout
             android:layout_width="match_parent"
-            android:layout_height="92dp">
+            android:layout_height="96dp"
+            android:layout_marginTop="8dp">
 
             <TextView
-            android:id="@+id/post"
-            android:layout_width="56dp"
-            android:layout_height="56dp"
-            android:layout_gravity="start|center_vertical"
-            android:layout_margin="0dp"
-            android:background="@drawable/bg_tool"
-            android:clickable="true"
-            android:drawableTint="@color/icon_tint"
-            android:drawableTop="@drawable/ic_post"
-            android:focusable="true"
-            android:gravity="center_horizontal"
-            android:paddingTop="8dp"
-            android:text="post"
-            android:textColor="@color/icon_tint"
-            android:textSize="10sp" android:visibility="gone" />
+                android:id="@+id/post"
+                android:layout_width="52dp"
+                android:layout_height="52dp"
+                android:layout_gravity="start|center_vertical"
+                android:layout_marginStart="8dp"
+                android:background="@drawable/bg_tool"
+                android:clickable="true"
+                android:drawableTint="@color/icon_tint"
+                android:drawableTop="@drawable/ic_post"
+                android:focusable="true"
+                android:gravity="center_horizontal"
+                android:paddingTop="8dp"
+                android:text="post"
+                android:textColor="@color/icon_tint"
+                android:textSize="10sp"
+                android:visibility="gone" />
 
             <View
                 android:id="@+id/record"
-                android:layout_width="76dp"
+                android:layout_width="80dp"
+                android:layout_height="80dp"
                 android:layout_gravity="center"
-                android:layout_height="76dp"
                 android:background="@drawable/capture_button"
                 android:clickable="true"
                 android:contentDescription="record"
                 android:focusable="true" />
 
             <TextView
-            android:id="@+id/flip"
-            android:layout_width="56dp"
-            android:layout_height="56dp"
-            android:layout_gravity="end|center_vertical"
-            android:layout_margin="0dp"
-            android:background="@drawable/bg_tool"
-            android:clickable="true"
-            android:drawableTint="@color/icon_tint"
-            android:drawableTop="@drawable/ic_flip"
-            android:focusable="true"
-            android:gravity="center_horizontal"
-            android:paddingTop="8dp"
-            android:text="flip"
-            android:textColor="@color/icon_tint"
-            android:textSize="10sp" />
+                android:id="@+id/flip"
+                android:layout_width="52dp"
+                android:layout_height="52dp"
+                android:layout_gravity="end|center_vertical"
+                android:layout_marginEnd="8dp"
+                android:background="@drawable/bg_tool"
+                android:clickable="true"
+                android:drawableTint="@color/icon_tint"
+                android:drawableTop="@drawable/ic_flip"
+                android:focusable="true"
+                android:gravity="center_horizontal"
+                android:paddingTop="8dp"
+                android:text="flip"
+                android:textColor="@color/icon_tint"
+                android:textSize="10sp" />
         </FrameLayout>
     </dev.nostrobe.MaxWidthLinearLayout>
 

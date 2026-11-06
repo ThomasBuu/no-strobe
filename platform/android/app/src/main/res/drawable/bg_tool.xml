@@ -1,15 +1,22 @@
 <?xml version="1.0" encoding="utf-8"?>
-<selector xmlns:android="http://schemas.android.com/apk/res/android">
-    <item android:state_selected="true">
-        <shape>
-            <solid android:color="#99107868" />
-            <corners android:radius="16dp" />
-        </shape>
-    </item>
+<ripple xmlns:android="http://schemas.android.com/apk/res/android"
+    android:color="@color/m3_primary">
     <item>
-        <shape>
-            <solid android:color="#66000000" />
-            <corners android:radius="16dp" />
-        </shape>
+        <selector>
+            <item android:state_selected="true">
+                <shape>
+                    <solid android:color="@color/m3_glass_tool_selected" />
+                    <stroke android:width="1.5dp" android:color="@color/m3_primary" />
+                    <corners android:radius="24dp" />
+                </shape>
+            </item>
+            <item>
+                <shape>
+                    <solid android:color="@color/m3_glass_tool" />
+                    <stroke android:width="1dp" android:color="@color/m3_glass_stroke" />
+                    <corners android:radius="24dp" />
+                </shape>
+            </item>
+        </selector>
     </item>
-</selector>
+</ripple>

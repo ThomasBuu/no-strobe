@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Material 3 Palette for No Strobe Camera -->
+    <color name="m3_surface">#121316</color>
+    <color name="m3_surface_container">#1A1C20</color>
+    <color name="m3_surface_container_high">#26282E</color>
+    <color name="m3_surface_container_highest">#31343C</color>
+
+    <color name="m3_primary">#5EEAD4</color>
+    <color name="m3_primary_container">#115E59</color>
+    <color name="m3_on_primary_container">#CCFBF1</color>
+
+    <color name="m3_secondary">#7DD3FC</color>
+    <color name="m3_secondary_container">#0369A1</color>
+
+    <!-- Status Indicators -->
+    <color name="m3_status_locked">#10B981</color>
+    <color name="m3_status_locked_container">#064E3B</color>
+    <color name="m3_status_scanning">#F59E0B</color>
+    <color name="m3_status_scanning_container">#78350F</color>
+    <color name="m3_status_recording">#EF4444</color>
+
+    <!-- Translucent Frosted Glass Materials -->
+    <color name="m3_glass_pill">#801A1C20</color>
+    <color name="m3_glass_stroke">#33FFFFFF</color>
+    <color name="m3_glass_tool">#6626282E</color>
+    <color name="m3_glass_tool_selected">#B3115E59</color>
+</resources>

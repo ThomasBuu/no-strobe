@@ -1,16 +1,18 @@
 <?xml version="1.0" encoding="utf-8"?>
 <layer-list xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- Material 3 Camera Shutter Ring -->
     <item>
         <shape android:shape="oval">
-            <solid android:color="#00000000" />
-            <stroke android:width="4dp" android:color="#FFFFFFFF" />
+            <solid android:color="#33000000" />
+            <stroke android:width="3.5dp" android:color="#FFFFFFFF" />
         </shape>
     </item>
+    <!-- Tactile Center Button -->
     <item
-        android:bottom="9dp"
-        android:left="9dp"
-        android:right="9dp"
-        android:top="9dp">
+        android:bottom="8dp"
+        android:left="8dp"
+        android:right="8dp"
+        android:top="8dp">
         <shape android:shape="oval">
             <solid android:color="#FFFFFFFF" />
         </shape>
