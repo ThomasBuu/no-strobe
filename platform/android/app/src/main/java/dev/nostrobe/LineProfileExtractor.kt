@@ -27,6 +27,17 @@ object LineProfileExtractor {
         val width = image.width
         val height = image.height
         val s = step.coerceAtLeast(1)
+
+        // Native SIMD fast path for direct buffers:
+        if (buf.isDirect) {
+            val prof = try {
+                NsJni.extractProfile(buf, width, height, rowStride, pixelStride, s, 1)
+            } catch (_: UnsatisfiedLinkError) {
+                null
+            }
+            if (prof != null && prof.isNotEmpty()) return prof
+        }
+
         val out = DoubleArray(height / s)
 
         for (i in 0 until height / s) {

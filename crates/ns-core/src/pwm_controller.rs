@@ -357,6 +357,29 @@ impl PwmController {
         }
     }
 
+    /// Feed a raw direct Y-plane buffer, extracting the profile via SIMD and getting the command.
+    pub fn on_y_plane(
+        &mut self,
+        y_plane: &[u8],
+        width: usize,
+        height: usize,
+        row_stride: usize,
+        pixel_stride: usize,
+        row_step: usize,
+        col_step: usize,
+    ) -> crate::controller::Command {
+        let profile = crate::profile::extract_row_profile(
+            y_plane,
+            width,
+            height,
+            row_stride,
+            pixel_stride,
+            row_step,
+            col_step,
+        );
+        self.on_profile(&profile)
+    }
+
     /// Sweep exposures with the temporal metric, starting at the geometric centre of the range.
     fn start_blind_sweep(&mut self) -> crate::controller::Command {
         self.f_hz = 0.0;

@@ -1,5 +1,5 @@
-use jni::objects::{JClass, JDoubleArray, ReleaseMode};
-use jni::sys::{jdouble, jlong};
+use jni::objects::{JByteBuffer, JClass, JDoubleArray, ReleaseMode};
+use jni::sys::{jdouble, jint, jlong};
 use jni::JNIEnv;
 
 use ns_core::camera::CameraLimits;
@@ -140,6 +140,94 @@ pub extern "system" fn Java_dev_nostrobe_NsJni_nativeOnProfile(
         ctrl.frequency_hz(),
     ];
     let _ = env.set_double_array_region(&out, 0, &out_values);
+}
+
+/// Feed a direct ByteBuffer of the Y-plane, extract the profile with SIMD and get the command in `out`.
+#[no_mangle]
+pub extern "system" fn Java_dev_nostrobe_NsJni_nativeOnYPlane(
+    env: JNIEnv,
+    _class: JClass,
+    handle: jlong,
+    buffer: JByteBuffer,
+    width: jint,
+    height: jint,
+    row_stride: jint,
+    pixel_stride: jint,
+    row_step: jint,
+    col_step: jint,
+    out: JDoubleArray,
+) {
+    let ctrl = unsafe { &mut *(handle as *mut PwmController) };
+    let (buf_ptr, buf_len) = match env.get_direct_buffer_address(&buffer) {
+        Ok(ptr) => {
+            let cap = env.get_direct_buffer_capacity(&buffer).unwrap_or(0);
+            (ptr, cap)
+        }
+        Err(_) => return,
+    };
+    if buf_ptr.is_null() || buf_len == 0 {
+        return;
+    }
+    let slice = unsafe { std::slice::from_raw_parts(buf_ptr, buf_len) };
+    let cmd = ctrl.on_y_plane(
+        slice,
+        width.max(0) as usize,
+        height.max(0) as usize,
+        row_stride.max(0) as usize,
+        pixel_stride.max(0) as usize,
+        row_step.max(1) as usize,
+        col_step.max(1) as usize,
+    );
+    let out_values: [f64; OUT_LEN] = [
+        cmd.exposure_us,
+        cmd.fps,
+        cmd.iso,
+        mode_code(cmd.mode) as f64,
+        state_code(cmd.state) as f64,
+        cmd.period_us,
+        cmd.confidence,
+        cmd.drift_us_per_frame,
+        ctrl.frequency_hz(),
+    ];
+    let _ = env.set_double_array_region(&out, 0, &out_values);
+}
+
+/// Extract the vertical row profile from a direct ByteBuffer into a JDoubleArray with SIMD.
+#[no_mangle]
+pub extern "system" fn Java_dev_nostrobe_NsJni_nativeExtractProfile<'a>(
+    env: JNIEnv<'a>,
+    _class: JClass,
+    buffer: JByteBuffer,
+    width: jint,
+    height: jint,
+    row_stride: jint,
+    pixel_stride: jint,
+    row_step: jint,
+    col_step: jint,
+) -> jni::objects::JDoubleArray<'a> {
+    let (buf_ptr, buf_len) = match env.get_direct_buffer_address(&buffer) {
+        Ok(ptr) => {
+            let cap = env.get_direct_buffer_capacity(&buffer).unwrap_or(0);
+            (ptr, cap)
+        }
+        Err(_) => return env.new_double_array(0).expect("new_double_array"),
+    };
+    if buf_ptr.is_null() || buf_len == 0 {
+        return env.new_double_array(0).expect("new_double_array");
+    }
+    let slice = unsafe { std::slice::from_raw_parts(buf_ptr, buf_len) };
+    let p = ns_core::profile::extract_row_profile(
+        slice,
+        width.max(0) as usize,
+        height.max(0) as usize,
+        row_stride.max(0) as usize,
+        pixel_stride.max(0) as usize,
+        row_step.max(1) as usize,
+        col_step.max(1) as usize,
+    );
+    let arr = env.new_double_array(p.len() as jni::sys::jsize).expect("new_double_array");
+    let _ = env.set_double_array_region(&arr, 0, &p);
+    arr
 }
 
 #[no_mangle]

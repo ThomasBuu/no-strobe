@@ -39,6 +39,26 @@ object NsJni {
     ): Long
 
     private external fun nativeOnProfile(handle: Long, profile: DoubleArray, out: DoubleArray)
+    private external fun nativeOnYPlane(
+        handle: Long,
+        buffer: java.nio.Buffer,
+        width: Int,
+        height: Int,
+        rowStride: Int,
+        pixelStride: Int,
+        rowStep: Int,
+        colStep: Int,
+        out: DoubleArray,
+    )
+    private external fun nativeExtractProfile(
+        buffer: java.nio.Buffer,
+        width: Int,
+        height: Int,
+        rowStride: Int,
+        pixelStride: Int,
+        rowStep: Int,
+        colStep: Int,
+    ): DoubleArray
 
     private external fun nativeDestroyPwm(handle: Long)
     private external fun nativeSeedPwm(handle: Long, exposureUs: Double, fHz: Double)
@@ -49,6 +69,17 @@ object NsJni {
     private external fun nativeSyntheticProfile(
         exposureUs: Double, fHz: Double, phaseCycles: Double, duty: Double, lineRateHz: Double, rows: Int,
     ): DoubleArray
+
+    /** Extract the vertical row profile from a direct Y-buffer using SIMD. */
+    fun extractProfile(
+        buffer: java.nio.Buffer,
+        width: Int,
+        height: Int,
+        rowStride: Int,
+        pixelStride: Int,
+        rowStep: Int = 1,
+        colStep: Int = 1,
+    ): DoubleArray = nativeExtractProfile(buffer, width, height, rowStride, pixelStride, rowStep, colStep)
 
     /** Test only: the row profile of a PWM light at [fHz], for the simulated-flicker mode. */
     fun syntheticProfile(
@@ -139,6 +170,20 @@ object NsJni {
         /** Feed one frame's vertical luminance profile (per-row mean luma, 0..1). */
         fun onProfile(profile: DoubleArray): NsCommand {
             nativeOnProfile(handle, profile, out)
+            return command(out)
+        }
+
+        /** Feed one frame's raw direct Y-buffer with SIMD profile extraction. */
+        fun onYPlane(
+            buffer: java.nio.Buffer,
+            width: Int,
+            height: Int,
+            rowStride: Int,
+            pixelStride: Int,
+            rowStep: Int = 1,
+            colStep: Int = 1,
+        ): NsCommand {
+            nativeOnYPlane(handle, buffer, width, height, rowStride, pixelStride, rowStep, colStep, out)
             return command(out)
         }
 

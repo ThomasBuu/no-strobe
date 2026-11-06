@@ -849,16 +849,25 @@ class NoStrobeCamera(
             }
             var lumaMean = 0.0
             val cmd = if (pwmMode) {
-                var prof = LineProfileExtractor.rowProfile(image, 1)
                 if (simFlickerHz > 0.0) {
                     // Simulated flicker: what a PWM light would show at the exposure the sensor
                     // really used for this frame, with a phase that follows the frame time.
                     val expUs = frameExposureNs / 1000.0
                     val phase = (image.timestamp * 1e-9 * simFlickerHz) % 1.0
-                    prof = NsJni.syntheticProfile(expUs, simFlickerHz, phase, 0.3, SIM_LINE_RATE_HZ, prof.size)
+                    val prof = NsJni.syntheticProfile(expUs, simFlickerHz, phase, 0.3, SIM_LINE_RATE_HZ, image.height)
+                    lumaMean = if (prof.isEmpty()) 0.0 else prof.average()
+                    pwm!!.onProfile(prof)
+                } else {
+                    val y = image.planes.getOrNull(0)
+                    val buf = y?.buffer
+                    if (buf != null && buf.isDirect) {
+                        pwm!!.onYPlane(buf, image.width, image.height, y.rowStride, y.pixelStride, 1, 1)
+                    } else {
+                        val prof = LineProfileExtractor.rowProfile(image, 1)
+                        lumaMean = if (prof.isEmpty()) 0.0 else prof.average()
+                        pwm!!.onProfile(prof)
+                    }
                 }
-                lumaMean = if (prof.isEmpty()) 0.0 else prof.average()
-                pwm!!.onProfile(prof)
             } else {
                 lumaMean = LumaExtractor.meanLuma(image).toDouble()
                 if (simFlickerHz > 0.0) {
