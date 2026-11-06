@@ -14,6 +14,21 @@
             android:layout_width="match_parent"
             android:layout_height="match_parent" />
 
+        <dev.nostrobe.GridOverlay
+            android:id="@+id/grid"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:visibility="gone" />
+
+        <TextView
+            android:id="@+id/countdown"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_gravity="center"
+            android:textColor="#FFFFFFFF"
+            android:textSize="96sp"
+            android:visibility="gone" />
+
         <ImageView
             android:id="@+id/focusRing"
             android:layout_width="76dp"
@@ -118,6 +133,38 @@
             android:gravity="end"
             android:fontFamily="monospace"
             android:text="+0.0 EV" />
+    </LinearLayout>
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:paddingStart="8dp"
+        android:paddingEnd="8dp">
+
+        <Button
+            android:id="@+id/mic"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:textAllCaps="false"
+            android:text="mic on" />
+
+        <Button
+            android:id="@+id/gridToggle"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:textAllCaps="false"
+            android:text="grid off" />
+
+        <Button
+            android:id="@+id/timer"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:textAllCaps="false"
+            android:text="timer off" />
     </LinearLayout>
 
     <TextView

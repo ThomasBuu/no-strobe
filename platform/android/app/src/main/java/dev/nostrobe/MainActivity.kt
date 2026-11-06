@@ -45,6 +45,13 @@ class MainActivity : AppCompatActivity() {
     private lateinit var lensRow: android.widget.LinearLayout
     private lateinit var flipButton: Button
     private lateinit var postButton: Button
+    private lateinit var micButton: Button
+    private lateinit var gridButton: Button
+    private lateinit var timerButton: Button
+    private lateinit var gridView: android.view.View
+    private lateinit var countdownText: TextView
+    private var micOn = true
+    private var timerSecs = 0
     // The last clip recorded (in the cache) and the row rate it was shot with.
     private var lastClip: File? = null
     private var lastRowRate = 0.0
@@ -81,7 +88,34 @@ class MainActivity : AppCompatActivity() {
         }
         status = findViewById(R.id.status)
         recordButton = findViewById(R.id.record)
-        recordButton.setOnClickListener { toggleRecord() }
+        recordButton.setOnClickListener {
+            if (recorder == null && timerSecs > 0) startCountdown(timerSecs) { toggleRecord() } else toggleRecord()
+        }
+        micButton = findViewById(R.id.mic)
+        gridButton = findViewById(R.id.gridToggle)
+        timerButton = findViewById(R.id.timer)
+        gridView = findViewById(R.id.grid)
+        countdownText = findViewById(R.id.countdown)
+        micOn = prefs().getBoolean("mic_on", true)
+        timerSecs = prefs().getInt("timer_secs", 0)
+        gridView.visibility = if (prefs().getBoolean("grid_on", false)) android.view.View.VISIBLE else android.view.View.GONE
+        refreshToggles()
+        micButton.setOnClickListener {
+            micOn = !micOn
+            prefs().edit().putBoolean("mic_on", micOn).apply()
+            refreshToggles()
+        }
+        gridButton.setOnClickListener {
+            val on = gridView.visibility != android.view.View.VISIBLE
+            gridView.visibility = if (on) android.view.View.VISIBLE else android.view.View.GONE
+            prefs().edit().putBoolean("grid_on", on).apply()
+            refreshToggles()
+        }
+        timerButton.setOnClickListener {
+            timerSecs = when (timerSecs) { 0 -> 3; 3 -> 10; else -> 0 }
+            prefs().edit().putInt("timer_secs", timerSecs).apply()
+            refreshToggles()
+        }
         lensRow = findViewById(R.id.lensRow)
         flipButton = findViewById(R.id.flip)
         zoomBar = findViewById(R.id.zoom)
@@ -357,6 +391,14 @@ class MainActivity : AppCompatActivity() {
         val r = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) MediaRecorder(this) else MediaRecorder()
         // The call order matters: the source first, then the format, then the encoders.
         // Video only for now: audio would need the RECORD_AUDIO permission.
+        val withAudio = micOn && ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) ==
+            PackageManager.PERMISSION_GRANTED
+        if (micOn && !withAudio) {
+            // Ask once; this clip is recorded without sound, the next one will have it.
+            ActivityCompat.requestPermissions(this, arrayOf(Manifest.permission.RECORD_AUDIO), 2)
+            Toast.makeText(this, "Allow the microphone to record sound.", Toast.LENGTH_SHORT).show()
+        }
+        if (withAudio) r.setAudioSource(MediaRecorder.AudioSource.CAMCORDER)
         r.setVideoSource(MediaRecorder.VideoSource.SURFACE)
         r.setOutputFormat(MediaRecorder.OutputFormat.MPEG_4)
         // Cap the requested rate (the profile asks 33 Mbit/s at 1080p60). The Pixel's encoder
@@ -371,6 +413,11 @@ class MainActivity : AppCompatActivity() {
         r.setVideoFrameRate(fps)
         r.setVideoSize(vw, vh)
         r.setVideoEncoder(MediaRecorder.VideoEncoder.H264)
+        if (withAudio) {
+            r.setAudioEncoder(MediaRecorder.AudioEncoder.AAC)
+            r.setAudioEncodingBitRate(128_000)
+            r.setAudioSamplingRate(44_100)
+        }
         r.setOrientationHint(sensorOrientation())
         r.setOutputFile(File(externalCacheDir ?: cacheDir, "clip.mp4").path)
         r.prepare()
@@ -427,6 +474,34 @@ class MainActivity : AppCompatActivity() {
             android.util.Log.w("nostrobe", "gallery save failed: ${e.message}")
             null
         }
+    }
+
+    private fun refreshToggles() {
+        micButton.text = if (micOn) "mic on" else "mic off"
+        gridButton.text = if (gridView.visibility == android.view.View.VISIBLE) "grid on" else "grid off"
+        timerButton.text = if (timerSecs == 0) "timer off" else "timer ${timerSecs}s"
+    }
+
+    /** Counts down on the preview, then runs [then] (starting the recording). */
+    private fun startCountdown(seconds: Int, then: () -> Unit) {
+        recordButton.isEnabled = false
+        countdownText.visibility = android.view.View.VISIBLE
+        val handler = android.os.Handler(android.os.Looper.getMainLooper())
+        var left = seconds
+        val tick = object : Runnable {
+            override fun run() {
+                if (left > 0) {
+                    countdownText.text = left.toString()
+                    left -= 1
+                    handler.postDelayed(this, 1000)
+                } else {
+                    countdownText.visibility = android.view.View.GONE
+                    recordButton.isEnabled = true
+                    then()
+                }
+            }
+        }
+        handler.post(tick)
     }
 
     private fun prefs() = getSharedPreferences("nostrobe", MODE_PRIVATE)

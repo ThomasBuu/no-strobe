@@ -133,6 +133,16 @@ object OnDevicePost {
             r.setDataSource(srcFile.path)
             r.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_ROTATION)?.toIntOrNull() ?: 0
         }
+        // The audio track (if any) is copied as is, so the fixed clip keeps its sound.
+        val audioEx = MediaExtractor().apply { setDataSource(srcFile.path) }
+        var audioFormat: MediaFormat? = null
+        for (i in 0 until audioEx.trackCount) {
+            val f = audioEx.getTrackFormat(i)
+            if (f.getString(MediaFormat.KEY_MIME)?.startsWith("audio/") == true) {
+                audioEx.selectTrack(i); audioFormat = f; break
+            }
+        }
+        var audioTrackOut = -1
         var encoder: MediaCodec? = null
         var muxer: MediaMuxer? = null
         var track = -1
@@ -149,6 +159,7 @@ object OnDevicePost {
                     o == MediaCodec.INFO_TRY_AGAIN_LATER -> if (!endOfStream) return
                     o == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED -> {
                         track = muxer!!.addTrack(enc.outputFormat)
+                        audioFormat?.let { audioTrackOut = muxer!!.addTrack(it) }
                         muxer!!.start(); muxerStarted = true
                     }
                     o >= 0 -> {
@@ -175,6 +186,8 @@ object OnDevicePost {
                         setInteger(MediaFormat.KEY_BIT_RATE, 17_000_000)
                         setInteger(MediaFormat.KEY_FRAME_RATE, 30)
                         setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 1)
+                        // No B-frames: the muxer takes the input timestamps as decode timestamps.
+                        if (android.os.Build.VERSION.SDK_INT >= 29) setInteger(MediaFormat.KEY_MAX_B_FRAMES, 0)
                     }
                     encoder = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_VIDEO_AVC).also {
                         it.configure(fmt, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
@@ -204,8 +217,20 @@ object OnDevicePost {
             val eos = enc.dequeueInputBuffer(-1)
             enc.queueInputBuffer(eos, 0, 0, 0, MediaCodec.BUFFER_FLAG_END_OF_STREAM)
             drain(true)
+            if (audioFormat != null && audioTrackOut >= 0 && muxerStarted) {
+                val buf = ByteBuffer.allocate(1 shl 20)
+                val bi = MediaCodec.BufferInfo()
+                while (true) {
+                    val n = audioEx.readSampleData(buf, 0)
+                    if (n < 0) break
+                    bi.set(0, n, audioEx.sampleTime, audioEx.sampleFlags)
+                    muxer!!.writeSampleData(audioTrackOut, buf, bi)
+                    audioEx.advance()
+                }
+            }
             onProgress(100)
         } finally {
+            audioEx.release()
             try { encoder?.stop() } catch (_: Exception) {}
             encoder?.release()
             try { if (muxerStarted) muxer?.stop() } catch (_: Exception) {}
