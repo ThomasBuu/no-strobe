@@ -28,11 +28,15 @@ import kotlin.math.pow
  * Preview, status readout, and record button. The shutter is driven by the Rust controller.
  */
 class MainActivity : AppCompatActivity() {
+    private companion object {
+        const val MAX_VIDEO_BITRATE = 30_000_000
+    }
+
     private var camera: NoStrobeCamera? = null
     private var recorder: MediaRecorder? = null
     private lateinit var surfaceView: SurfaceView
     private lateinit var status: TextView
-    private lateinit var recordButton: Button
+    private lateinit var recordButton: android.view.View
     private lateinit var lensRow: android.widget.LinearLayout
     private lateinit var flipButton: Button
     private lateinit var zoomBar: SeekBar
@@ -93,7 +97,7 @@ class MainActivity : AppCompatActivity() {
     override fun onPause() {
         camera?.closeMeta()
         recorder?.stop(); recorder?.release(); recorder = null
-        recordButton.text = "record"
+        recordButton.isSelected = false
         super.onPause()
     }
 
@@ -233,7 +237,7 @@ class MainActivity : AppCompatActivity() {
                 android.util.Log.w("nostrobe", "recorder stopped without data: ${e.message}")
             }
             recorder?.release(); recorder = null
-            recordButton.text = "record"
+            recordButton.isSelected = false
             notifyPost(total, locked)
             camera?.stop(); startCamera()
             return
@@ -247,7 +251,10 @@ class MainActivity : AppCompatActivity() {
         // Video only for now: audio would need the RECORD_AUDIO permission.
         r.setVideoSource(MediaRecorder.VideoSource.SURFACE)
         r.setOutputFormat(MediaRecorder.OutputFormat.MPEG_4)
-        r.setVideoEncodingBitRate(p.videoBitRate)
+        // Cap the requested rate (the profile asks 33 Mbit/s at 1080p60). The Pixel's encoder
+        // still overshoots on very noisy footage: measured ~143 Mbit/s in a dark scene.
+        r.setVideoEncodingBitRate(minOf(p.videoBitRate, MAX_VIDEO_BITRATE))
+        android.util.Log.i("nostrobe", "recorder: profile %d bps -> asked %d bps, %dx%d @ %d".format(p.videoBitRate, minOf(p.videoBitRate, MAX_VIDEO_BITRATE), p.videoFrameWidth, p.videoFrameHeight, p.videoFrameRate))
         r.setVideoFrameRate(p.videoFrameRate)
         r.setVideoSize(p.videoFrameWidth, p.videoFrameHeight)
         r.setVideoEncoder(MediaRecorder.VideoEncoder.H264)
@@ -255,7 +262,7 @@ class MainActivity : AppCompatActivity() {
         r.setOutputFile(File(externalCacheDir, "clip.mp4").path)
         r.prepare()
         recorder = r
-        recordButton.text = "stop"
+        recordButton.isSelected = true
         val w = java.io.FileWriter(File(externalCacheDir, "clip.csv"))
         w.write("timestamp_ns,exposure_ns,iso,luma,state,freq_hz,stale\n")
         pendingMeta = w

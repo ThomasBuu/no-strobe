@@ -79,9 +79,20 @@
         android:textSize="14sp"
         android:text="search" />
 
-    <Button
-        android:id="@+id/record"
+    <FrameLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:text="record" />
+        android:paddingTop="6dp"
+        android:paddingBottom="14dp">
+
+        <View
+            android:id="@+id/record"
+            android:layout_width="76dp"
+            android:layout_height="76dp"
+            android:layout_gravity="center_horizontal"
+            android:background="@drawable/capture_button"
+            android:contentDescription="record"
+            android:clickable="true"
+            android:focusable="true" />
+    </FrameLayout>
 </LinearLayout>
