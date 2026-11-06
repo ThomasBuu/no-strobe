@@ -32,3 +32,13 @@ out/
 .vscode/
 *.swp
 .DS_Store
+
+# Applis strobe (platform/ios/app, platform/android-strobe, tools/android-strobe-flasher)
+/platform/ios/app/*.xcodeproj/
+/platform/ios/app/build/
+/platform/android-strobe/local.properties
+/platform/android-strobe/.gradle/
+/platform/android-strobe/app/build/
+/tools/android-strobe-flasher/local.properties
+/tools/android-strobe-flasher/.gradle/
+/tools/android-strobe-flasher/app/build/
