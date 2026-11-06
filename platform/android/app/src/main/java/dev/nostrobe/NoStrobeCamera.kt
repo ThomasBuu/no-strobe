@@ -201,6 +201,7 @@ class NoStrobeCamera(
 
     fun start() {
         stopped = false
+        Log.i(TAG, "controller: ${if (pwmMode) "pwm (100 Hz - 5 kHz, row profile)" else "strobe (slow flashes, frame luma)"}")
         // A 32-bit process on a 64-bit capable device (measured on a Xperia 1 III ROM): the
         // framework aborts the whole process inside ImageReader's Image.getPlanes(), which
         // cannot be caught. Those devices stay on auto-exposure and only record.
@@ -536,6 +537,25 @@ class NoStrobeCamera(
         }
     }
 
+    /** Brightness of a frame under a strobe of [hz] (10 % duty): ambient + the flash share caught. */
+    private fun simStrobeLuma(tsNs: Long, expNs: Long, hz: Double): Double {
+        val period = 1e9 / hz
+        val pulse = 0.1 * period
+        val start = tsNs.toDouble()
+        val end = start + expNs
+        var caught = 0.0
+        var n = Math.floor(start / period) - 1
+        while (n * period < end) {
+            val a = maxOf(start, n * period)
+            val b = minOf(end, n * period + pulse)
+            if (b > a) caught += b - a
+            n += 1.0
+        }
+        // Ambient grows with the exposure; the pulse adds its caught energy (full pulse = 0.8).
+        val ambient = 0.1 * minOf(1.0, expNs / 33e6)
+        return (ambient + 0.8 * (caught / pulse)).coerceIn(0.0, 1.0)
+    }
+
     private fun unsupportedStatus() = NsCommand(0.0, 0.0, 0.0, NsJni.MODE_UNSUPPORTED,
         NsJni.STATE_SEARCH, 0.0, 0.0, 0.0)
 
@@ -633,6 +653,11 @@ class NoStrobeCamera(
                 pwm!!.onProfile(prof)
             } else {
                 lumaMean = LumaExtractor.meanLuma(image).toDouble()
+                if (simFlickerHz > 0.0) {
+                    // Simulated slow strobe (pulses of 10 % duty): the frame's brightness is the part
+                    // of the pulse its exposure window caught, so the shutter really matters.
+                    lumaMean = simStrobeLuma(image.timestamp, frameExposureNs, simFlickerHz)
+                }
                 strobe!!.onFrame(image.timestamp / 1000.0, lumaMean)
             }
             // ISO that keeps the metered brightness at this exposure; the controller's own

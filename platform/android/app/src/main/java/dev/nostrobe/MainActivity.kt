@@ -203,7 +203,7 @@ class MainActivity : AppCompatActivity() {
         // Surface object read after it is the pre-resize one, which createCaptureSession
         // rejects with "Surface was abandoned".
         camera = NoStrobeCamera(
-            manager, option.logicalId, holder.surface, recorder, pwmMode = true,
+            manager, option.logicalId, holder.surface, recorder, pwmMode = !intent.getBooleanExtra("strobe_mode", false),
             // While recording, do not pin a physical lens: on a Pixel 11 Pro Fold the recorder
             // surface of a pinned-lens stream received garbage frames (pure noise). The lock
             // (an exposure that is a multiple of the period) does not depend on the sensor, so
