@@ -42,6 +42,7 @@ object NsJni {
 
     private external fun nativeDestroyPwm(handle: Long)
     private external fun nativeSeedPwm(handle: Long, exposureUs: Double, fHz: Double)
+    private external fun nativeFrequencyPwm(handle: Long): Double
     private external fun nativeSetShutterFraction(handle: Long, fraction: Double)
     private external fun nativeSetMinExposure(handle: Long, us: Double)
     private external fun nativeSetMaxExposure(handle: Long, us: Double)
@@ -113,10 +114,12 @@ object NsJni {
         val periodUs: Double,
         val confidence: Double,
         val driftUsPerFrame: Double,
+        /** The flicker frequency found (0 while searching): the locked exposure is k / f. */
+        val flickerHz: Double = 0.0,
     )
 
     class SyncController(private val handle: Long) {
-        private val out = DoubleArray(8)
+        private val out = DoubleArray(9)
 
         /** Feed one frame (readout start in microseconds, mean luma 0..1), get the shutter command. */
         fun onFrame(tUs: Double, luminance: Double): NsCommand {
@@ -131,7 +134,7 @@ object NsJni {
 
     /** PWM (LED flicker) controller: feed the per-row luma profile of each frame. */
     class PwmSyncController(private val handle: Long) {
-        private val out = DoubleArray(8)
+        private val out = DoubleArray(9)
 
         /** Feed one frame's vertical luminance profile (per-row mean luma, 0..1). */
         fun onProfile(profile: DoubleArray): NsCommand {
@@ -159,6 +162,9 @@ object NsJni {
             nativeSeedPwm(handle, exposureUs, fHz)
         }
 
+        /** The flicker frequency found (0 while searching); the locked exposure is k / f, not 1 / f. */
+        fun frequencyHz(): Double = nativeFrequencyPwm(handle)
+
         fun close() {
             nativeDestroyPwm(handle)
         }
@@ -173,6 +179,7 @@ object NsJni {
         periodUs = out[5],
         confidence = out[6],
         driftUsPerFrame = out[7],
+        flickerHz = out[8],
     )
 }
 

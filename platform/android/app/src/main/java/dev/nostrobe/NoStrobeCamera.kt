@@ -140,7 +140,7 @@ class NoStrobeCamera(
                 recFrames += 1
                 if (c?.state == NsJni.STATE_LOCKED) recLocked += 1
             }
-            val hz = if (c != null && c.periodUs > 0) 1e6 / c.periodUs else 0.0
+            val hz = c?.flickerHz ?: 0.0
             try {
                 w.write(String.format(Locale.US, "%d,%d,%d,%.4f,%d,%.1f,%d\n",
                     ts, expNs, c?.iso?.toInt() ?: 0, luma, c?.state ?: -1, hz, if (stale) 1 else 0))
@@ -507,12 +507,10 @@ class NoStrobeCamera(
     private fun applySeededHighSpeed(hs: CameraConstrainedHighSpeedCaptureSession) {
         val b = builder ?: return
         if (stopped || seedHz <= 0.0) return
-        val frameUs = 1e6 / highSpeedFps
-        val k = Math.floor(0.9 * frameUs * seedHz / 1e6).coerceAtLeast(1.0)
-        val e = k * 1e6 / seedHz
+        val (k, e) = HighSpeedPick.exposureFor(1e6 / highSpeedFps, seedHz)
         val budget = if (budgetUsIso > 0.0) budgetUsIso else latestAutoBudget
         val iso = if (budget > 0.0) (budget * Math.pow(2.0, evBias.toDouble()) / e).coerceIn(isoMin, isoMax) else isoMin
-        val cmd = NsCommand(e, highSpeedFps.toDouble(), iso, NsJni.MODE_PWM, NsJni.STATE_LOCKED, 1e6 / seedHz, 0.8, 0.0)
+        val cmd = NsCommand(e, highSpeedFps.toDouble(), iso, NsJni.MODE_PWM, NsJni.STATE_LOCKED, 1e6 / seedHz, 0.8, 0.0, seedHz)
         Camera2Sync.apply(b, cmd)
         b.set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, android.util.Range(highSpeedFps, highSpeedFps))
         requestedExposureNs = (e * 1000.0).toLong()
@@ -617,7 +615,7 @@ class NoStrobeCamera(
             (budget * Math.pow(2.0, evBias.toDouble()) / seedExposureUs).coerceIn(isoMin, isoMax)
         } else isoMin
         val cmd = NsCommand(seedExposureUs, recordFps.toDouble(), iso, NsJni.MODE_PWM, NsJni.STATE_LOCKED,
-            1e6 / seedHz, 0.8, 0.0)
+            1e6 / seedHz, 0.8, 0.0, seedHz)
         Camera2Sync.apply(b, cmd)
         applyZoom(b)
         applyQuality(b)
@@ -829,9 +827,11 @@ class NoStrobeCamera(
             } else {
                 cmd
             }
-            if (applied.state == NsJni.STATE_LOCKED && applied.periodUs > 0.0) {
+            if (applied.state == NsJni.STATE_LOCKED && (applied.flickerHz > 0.0 || applied.periodUs > 0.0)) {
                 lockExposureUs = applied.exposureUs
-                lockHz = 1e6 / applied.periodUs
+                // The flicker frequency, not 1 / the locked exposure: the exposure is k / f, and
+                // the high-speed choice (fps <= f) and the seed need f.
+                lockHz = if (applied.flickerHz > 0.0) applied.flickerHz else (pwm?.frequencyHz() ?: 0.0)
                 lockFps = applied.fps
                 lockAtMs = SystemClock.elapsedRealtime()
             }
@@ -929,9 +929,9 @@ class NoStrobeCamera(
 
     private companion object {
         const val TAG = "nostrobe"
-        const val PROBE_MS = 60_000L
+        const val PROBE_MS = 120_000L
         /** Longer while the controller reports a real flicker it is still homing in on. */
-        const val PROBE_SIGNAL_MS = 90_000L
+        const val PROBE_SIGNAL_MS = 150_000L
         const val REST_MS = 12_000L
         const val FOCUS_HOLD_MS = 3_000L
         const val SIM_LINE_RATE_HZ = 40_000.0

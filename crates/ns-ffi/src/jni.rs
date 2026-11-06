@@ -11,7 +11,7 @@ use crate::{mode_code, state_code};
 /// Output slot order for `nativeOnFrame`:
 /// [0] exposure_us, [1] fps, [2] iso, [3] mode (0 Integrate, 1 Gap, 2 Flash),
 /// [4] state (0 Search, 1 Locked), [5] period_us, [6] confidence, [7] drift_us_per_frame.
-const OUT_LEN: usize = 8;
+const OUT_LEN: usize = 9;
 
 #[no_mangle]
 pub extern "system" fn Java_dev_nostrobe_NsJni_nativeCreate(
@@ -45,7 +45,7 @@ pub extern "system" fn Java_dev_nostrobe_NsJni_nativeCreate(
 
 #[no_mangle]
 pub extern "system" fn Java_dev_nostrobe_NsJni_nativeOnFrame(
-    mut env: JNIEnv,
+    env: JNIEnv,
     _class: JClass,
     handle: jlong,
     t_us: jdouble,
@@ -64,6 +64,7 @@ pub extern "system" fn Java_dev_nostrobe_NsJni_nativeOnFrame(
         cmd.period_us,
         cmd.confidence,
         cmd.drift_us_per_frame,
+        0.0, // slot 8: no flicker frequency on the strobo path
     ];
 
     let _ = env.set_double_array_region(&out, 0, &values);
@@ -136,6 +137,7 @@ pub extern "system" fn Java_dev_nostrobe_NsJni_nativeOnProfile(
         cmd.period_us,
         cmd.confidence,
         cmd.drift_us_per_frame,
+        ctrl.frequency_hz(),
     ];
     let _ = env.set_double_array_region(&out, 0, &out_values);
 }
@@ -156,7 +158,7 @@ pub extern "system" fn Java_dev_nostrobe_NsJni_nativeDestroyPwm(
 /// closed loop with a flicker that reacts to the exposure the sensor really applied.
 #[no_mangle]
 pub extern "system" fn Java_dev_nostrobe_NsJni_nativeSyntheticProfile<'a>(
-    mut env: JNIEnv<'a>,
+    env: JNIEnv<'a>,
     _class: JClass,
     exposure_us: jdouble,
     f_hz: jdouble,
@@ -183,6 +185,18 @@ pub extern "system" fn Java_dev_nostrobe_NsJni_nativeSeedPwm(
 ) {
     let ctrl = unsafe { &mut *(handle as *mut PwmController) };
     ctrl.seed_lock(exposure_us, f_hz);
+}
+
+/// The flicker frequency the controller has found (0 while searching): the exposure read from
+/// the hill is k / f, so the app must ask the controller for f, not invert the exposure.
+#[no_mangle]
+pub extern "system" fn Java_dev_nostrobe_NsJni_nativeFrequencyPwm(
+    _env: JNIEnv,
+    _class: JClass,
+    handle: jlong,
+) -> jdouble {
+    let ctrl = unsafe { &*(handle as *const PwmController) };
+    ctrl.frequency_hz()
 }
 
 /// Shortest exposure worth searching with (brightness budget / ISO limit), microseconds.

@@ -788,7 +788,7 @@ class MainActivity : AppCompatActivity() {
     /** The on-screen line: state, flicker frequency, exposure and ISO. */
     private fun shortStatus(cmd: NsCommand): String {
         val locked = cmd.state == NsJni.STATE_LOCKED
-        val hz = if (cmd.periodUs > 0) 1e6 / cmd.periodUs else 0.0
+        val hz = cmd.flickerHz
         val head = when {
             cmd.mode == NsJni.MODE_AUTO || cmd.mode == NsJni.MODE_UNSUPPORTED -> "AUTO"
             locked && hz > 0 -> "LOCK %.0f Hz".format(hz)
@@ -797,7 +797,8 @@ class MainActivity : AppCompatActivity() {
         }
         if (cmd.exposureUs <= 0) return head
         val exp = if (cmd.exposureUs >= 1000) "%.1f ms".format(cmd.exposureUs / 1000) else "%.0f us".format(cmd.exposureUs)
-        return "$head · $exp · ISO %.0f".format(cmd.iso)
+        val hs = if (hsFps > 0) " (HS %d)".format(hsFps) else ""
+        return "$head$hs · $exp · ISO %.0f".format(cmd.iso)
     }
 
     private fun describe(cmd: NsCommand): String {
@@ -811,7 +812,7 @@ class MainActivity : AppCompatActivity() {
             else -> "?"
         }
         val state = if (cmd.state == NsJni.STATE_LOCKED) "locked" else "search"
-        val hz = if (cmd.periodUs > 0) 1e6 / cmd.periodUs else 0.0
+        val hz = cmd.flickerHz
         return "%s  %s  %.0f us  fps %.0f  iso %.0f  %.1f Hz  conf %.2f".format(
             state, mode, cmd.exposureUs, cmd.fps, cmd.iso, hz, cmd.confidence
         )
