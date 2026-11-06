@@ -42,6 +42,8 @@ class MainActivity : AppCompatActivity() {
     private lateinit var flipButton: Button
     private lateinit var zoomBar: SeekBar
     private lateinit var zoomText: TextView
+    private lateinit var exposureBar: SeekBar
+    private lateinit var exposureText: TextView
 
     // Lens and zoom. The default is a pinned physical lens: the phone's logical camera
     // switches lenses by itself, which moves the sensor under the flicker measurement.
@@ -50,6 +52,10 @@ class MainActivity : AppCompatActivity() {
     private var zoomRatio = 1f
     private var zoomMin = 1f
     private var zoomMax = 1f
+    // Exposure compensation: index range and step come from the chosen camera.
+    private var evBias = 0f
+    private var evStep = 0f
+    private var evMinIndex = 0
     private var pendingMeta: java.io.Writer? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -73,6 +79,26 @@ class MainActivity : AppCompatActivity() {
         zoomBar = findViewById(R.id.zoom)
         zoomText = findViewById(R.id.zoomText)
         flipButton.setOnClickListener { flipCamera() }
+        exposureBar = findViewById(R.id.exposureBar)
+        exposureText = findViewById(R.id.exposureText)
+        exposureBar.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+            override fun onProgressChanged(bar: SeekBar, progress: Int, fromUser: Boolean) {
+                if (!fromUser || evStep <= 0f) return
+                evBias = (evMinIndex + progress) * evStep
+                exposureText.text = "%+.1f EV".format(evBias)
+                camera?.setExposureBias(evBias)
+            }
+            override fun onStartTrackingTouch(bar: SeekBar) {}
+            override fun onStopTrackingTouch(bar: SeekBar) {}
+        })
+        // A tap on the value resets the bias.
+        exposureText.setOnClickListener {
+            if (evStep <= 0f) return@setOnClickListener
+            evBias = 0f
+            exposureBar.progress = -evMinIndex
+            exposureText.text = "%+.1f EV".format(0f)
+            camera?.setExposureBias(0f)
+        }
         findViewById<Button>(R.id.zoomOut).setOnClickListener { stepZoom(1f / 1.25f) }
         findViewById<Button>(R.id.zoomIn).setOnClickListener { stepZoom(1.25f) }
         zoomBar.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
@@ -122,13 +148,14 @@ class MainActivity : AppCompatActivity() {
         }
         val option = lensOptions[lensIndex]
         configureZoom(manager, option)
+        configureExposure(manager, option)
         val holder = surfaceView.holder
         // Do not call holder.setFixedSize: resizing recreates the surface buffers and the
         // Surface object read after it is the pre-resize one, which createCaptureSession
         // rejects with "Surface was abandoned".
         camera = NoStrobeCamera(
             manager, option.logicalId, holder.surface, recorder, pwmMode = true,
-            physicalId = option.physicalId, zoomRatio = zoomRatio,
+            physicalId = option.physicalId, zoomRatio = zoomRatio, evBias = evBias,
             onReady = {
                 // Session configured with the recorder surface: start recording now.
                 val r = recorder
@@ -150,6 +177,27 @@ class MainActivity : AppCompatActivity() {
         camera?.meta = pendingMeta
         pendingMeta = null
         camera?.start()
+    }
+
+    /** Range and step of the exposure compensation of the chosen camera. */
+    private fun configureExposure(manager: CameraManager, option: LensOption) {
+        val chars = manager.getCameraCharacteristics(option.logicalId)
+        val range = chars.get(CameraCharacteristics.CONTROL_AE_COMPENSATION_RANGE)
+        val step = chars.get(CameraCharacteristics.CONTROL_AE_COMPENSATION_STEP)?.toFloat() ?: 0f
+        if (range == null || step <= 0f || range.upper <= range.lower) {
+            evStep = 0f
+            exposureBar.isEnabled = false
+            exposureBar.max = 0
+            exposureText.text = "n/a"
+            return
+        }
+        evStep = step
+        evMinIndex = range.lower
+        exposureBar.isEnabled = true
+        exposureBar.max = range.upper - range.lower
+        evBias = evBias.coerceIn(range.lower * step, range.upper * step)
+        exposureBar.progress = Math.round(evBias / step) - evMinIndex
+        exposureText.text = "%+.1f EV".format(evBias)
     }
 
     /** Zoom range of the chosen camera; a pinned lens starts at its own 1x. */

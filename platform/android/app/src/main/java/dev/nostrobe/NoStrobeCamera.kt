@@ -42,6 +42,8 @@ class NoStrobeCamera(
     /** Pins one lens of a logical multi-camera; null leaves the lens choice to the phone. */
     private val physicalId: String? = null,
     private var zoomRatio: Float = 1f,
+    /** Exposure compensation in EV (stops), from the exposure bar. */
+    private var evBias: Float = 0f,
     /** Called once the capture session is configured and the repeating request runs. */
     private val onReady: () -> Unit = {},
     private val onStatus: (NsCommand) -> Unit,
@@ -232,6 +234,29 @@ class NoStrobeCamera(
         }, null)
     }
 
+    private fun applyBias(b: CaptureRequest.Builder) {
+        // Only used while the camera's auto-exposure runs (before probing, and in the rest
+        // periods). In manual exposure the bias scales the ISO budget instead.
+        val chars = manager.getCameraCharacteristics(cameraId)
+        val step = chars.get(CameraCharacteristics.CONTROL_AE_COMPENSATION_STEP)?.toFloat() ?: return
+        val range = chars.get(CameraCharacteristics.CONTROL_AE_COMPENSATION_RANGE) ?: return
+        if (step <= 0f) return
+        b.set(CaptureRequest.CONTROL_AE_EXPOSURE_COMPENSATION, Math.round(evBias / step).coerceIn(range.lower, range.upper))
+    }
+
+    /** Exposure bar: takes effect on the next frame, without touching the flicker lock. */
+    fun setExposureBias(ev: Float) {
+        evBias = ev
+        last = null  // the next analysed frame re-applies the ISO with the new bias
+        val b = builder ?: return
+        applyBias(b)
+        try {
+            session?.setRepeatingRequest(b.build(), resultCallback, handler)
+        } catch (e: Exception) {
+            Log.w(TAG, "exposure bias not applied: ${e.message}")
+        }
+    }
+
     private fun applyZoom(b: CaptureRequest.Builder) {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
             b.set(CaptureRequest.CONTROL_ZOOM_RATIO, zoomRatio)
@@ -316,6 +341,7 @@ class NoStrobeCamera(
         val b = d.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW)
         for (s in surfaces) b.addTarget(s)
         applyZoom(b)
+        applyBias(b)
         builder = b
         val callback = object : CameraCaptureSession.StateCallback() {
             override fun onConfigured(s: CameraCaptureSession) {
@@ -415,7 +441,7 @@ class NoStrobeCamera(
             // ISO that keeps the metered brightness at this exposure; the controller's own
             // ISO has no reference for the scene and is ignored once the budget is known.
             val applied = if (budgetUsIso > 0.0) {
-                cmd.copy(iso = (budgetUsIso / cmd.exposureUs).coerceIn(isoMin, isoMax))
+                cmd.copy(iso = (budgetUsIso * Math.pow(2.0, evBias.toDouble()) / cmd.exposureUs).coerceIn(isoMin, isoMax))
             } else {
                 cmd
             }
@@ -463,6 +489,7 @@ class NoStrobeCamera(
                 val b = d.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW)
                 for (t in surfaceList) b.addTarget(t)
                 applyZoom(b)
+                applyBias(b)
                 builder = b
                 sess.setRepeatingRequest(b.build(), resultCallback, handler)
             } catch (e: Exception) {
