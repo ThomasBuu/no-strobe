@@ -358,3 +358,8 @@ settings dialog). Both save the result next to the original in Movies/no-strobe.
 
 Limit: the gain is computed from each frame's own brightness, so a genuine fade or an
 auto-exposure change in the clip is flattened too.
+
+## Contributing
+
+Branches, commit rules (signed commits, no LLM trailers, no force push), what to test before a
+pull request, and how to quote a real-phone log: see `CONTRIBUTING.md`.
