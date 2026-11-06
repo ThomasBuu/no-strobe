@@ -1,0 +1,16 @@
+[package]
+name = "ns-ffi"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "ns_ffi"
+crate-type = ["cdylib", "staticlib"]
+
+[dependencies]
+jni = { version = "0.21", optional = true }
+ns-core = { path = "../ns-core" }
+
+[features]
+android = ["jni"]
+jni = ["dep:jni"]

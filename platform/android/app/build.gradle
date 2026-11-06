@@ -1,0 +1,39 @@
+plugins {
+    id("com.android.application")
+    // AGP 9 has built-in Kotlin support; org.jetbrains.kotlin.android must not be applied.
+}
+
+android {
+    namespace = "dev.nostrobe"
+    compileSdk = 34
+
+    defaultConfig {
+        applicationId = "dev.nostrobe"
+        // SENSOR_INFO_ROLLING_SHUTTER_SUSTAIN_DURATION needs API 31.
+        minSdk = 26
+        targetSdk = 34
+        // libns_ffi.so is placed in src/main/jniLibs/<abi>/ by
+        // `cargo ndk -t arm64-v8a -o app/src/main/jniLibs/arm64-v8a build --release --features android`
+        ndk {
+            abiFilters "arm64-v8a", "armeabi-v7a"
+        }
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+    // AGP 9 built-in Kotlin: kotlinOptions is gone, jvmTarget defaults to
+    // compileOptions.targetCompatibility.
+}
+
+dependencies {
+    implementation "androidx.core:core-ktx:1.12.0"
+    implementation "androidx.appcompat:appcompat:1.6.1"
+}

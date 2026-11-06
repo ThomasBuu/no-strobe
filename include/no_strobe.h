@@ -1,0 +1,79 @@
+#include <cstdarg>
+#include <cstdint>
+#include <cstdlib>
+#include <ostream>
+#include <new>
+
+struct NsCommand {
+  double exposure_us;
+  double fps;
+  double iso;
+  /// 0 = Integrate, 1 = Gap, 2 = Flash.
+  int32_t mode;
+  /// 0 = Search, 1 = Locked.
+  int32_t state;
+  double period_us;
+  double confidence;
+  double drift_us_per_frame;
+};
+
+extern "C" {
+
+/// Create a controller. `fps_ptr` is a slice of supported frame rates.
+///
+/// # Safety
+/// `fps_ptr` must point to `fps_len` contiguous f64 values, or be null when `fps_len` is 0.
+Controller *ns_create(double min_exposure_us,
+                      double max_exposure_us,
+                      double sustain_us,
+                      const double *fps_ptr,
+                      uintptr_t fps_len,
+                      double min_iso,
+                      double max_iso);
+
+/// Feed one frame, get the shutter command to apply. `luminance` is the mean luma of the
+/// frame, normalized to 0..1. `t_us` is the frame readout start in microseconds.
+///
+/// # Safety
+/// `handle` must come from `ns_create` and not have been freed. `out` must be a valid pointer.
+void ns_on_frame(Controller *handle, double t_us, double luminance, NsCommand *out);
+
+/// Free the controller.
+///
+/// # Safety
+/// `handle` must come from `ns_create` and must not be used after this call.
+void ns_destroy(Controller *handle);
+
+/// Create a PWM (LED flicker) controller. `line_rate_hz` is the sensor row
+/// readout rate in rows per second; pass 0 when the device does not publish it,
+/// the controller then calibrates by sweeping exposures.
+///
+/// # Safety
+/// `fps_ptr` must point to `fps_len` contiguous f64 values, or be null when `fps_len` is 0.
+PwmController *ns_create_pwm(double min_exposure_us,
+                             double max_exposure_us,
+                             double sustain_us,
+                             const double *fps_ptr,
+                             uintptr_t fps_len,
+                             double min_iso,
+                             double max_iso,
+                             double line_rate_hz);
+
+/// Feed one frame's vertical luminance profile, get the shutter command.
+/// `profile` is the per-row mean luma of the frame, normalized to 0..1.
+///
+/// # Safety
+/// `handle` must come from `ns_create_pwm`. `profile` must point to `profile_len`
+/// contiguous f64 values. `out` must be a valid pointer.
+void ns_on_profile(PwmController *handle,
+                   const double *profile_ptr,
+                   uintptr_t profile_len,
+                   NsCommand *out);
+
+/// Free the PWM controller.
+///
+/// # Safety
+/// `handle` must come from `ns_create_pwm` and must not be used after this call.
+void ns_destroy_pwm(PwmController *handle);
+
+}  // extern "C"
