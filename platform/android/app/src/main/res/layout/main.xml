@@ -18,11 +18,34 @@
         android:paddingStart="8dp"
         android:paddingEnd="8dp">
 
+        <LinearLayout
+            android:id="@+id/lensRow"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:orientation="horizontal" />
+
         <Button
-            android:id="@+id/lens"
+            android:id="@+id/flip"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:text="lens" />
+            android:text="flip" />
+    </LinearLayout>
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:gravity="center_vertical"
+        android:paddingStart="8dp"
+        android:paddingEnd="8dp">
+
+        <Button
+            android:id="@+id/zoomOut"
+            android:layout_width="48dp"
+            android:layout_height="wrap_content"
+            android:minWidth="0dp"
+            android:text="-" />
 
         <SeekBar
             android:id="@+id/zoom"
@@ -30,6 +53,13 @@
             android:layout_height="wrap_content"
             android:layout_weight="1"
             android:max="100" />
+
+        <Button
+            android:id="@+id/zoomIn"
+            android:layout_width="48dp"
+            android:layout_height="wrap_content"
+            android:minWidth="0dp"
+            android:text="+" />
 
         <TextView
             android:id="@+id/zoomText"

@@ -33,7 +33,8 @@ class MainActivity : AppCompatActivity() {
     private lateinit var surfaceView: SurfaceView
     private lateinit var status: TextView
     private lateinit var recordButton: Button
-    private lateinit var lensButton: Button
+    private lateinit var lensRow: android.widget.LinearLayout
+    private lateinit var flipButton: Button
     private lateinit var zoomBar: SeekBar
     private lateinit var zoomText: TextView
 
@@ -53,15 +54,13 @@ class MainActivity : AppCompatActivity() {
         status = findViewById(R.id.status)
         recordButton = findViewById(R.id.record)
         recordButton.setOnClickListener { toggleRecord() }
-        lensButton = findViewById(R.id.lens)
+        lensRow = findViewById(R.id.lensRow)
+        flipButton = findViewById(R.id.flip)
         zoomBar = findViewById(R.id.zoom)
         zoomText = findViewById(R.id.zoomText)
-        lensButton.setOnClickListener {
-            if (lensOptions.isEmpty()) return@setOnClickListener
-            lensIndex = (lensIndex + 1) % lensOptions.size
-            zoomRatio = 1f
-            camera?.stop(); startCamera()
-        }
+        flipButton.setOnClickListener { flipCamera() }
+        findViewById<Button>(R.id.zoomOut).setOnClickListener { stepZoom(1f / 1.25f) }
+        findViewById<Button>(R.id.zoomIn).setOnClickListener { stepZoom(1.25f) }
         zoomBar.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
             override fun onProgressChanged(bar: SeekBar, progress: Int, fromUser: Boolean) {
                 if (!fromUser || zoomMax <= zoomMin) return
@@ -141,7 +140,7 @@ class MainActivity : AppCompatActivity() {
 
     /** Zoom range of the chosen camera; a pinned lens starts at its own 1x. */
     private fun configureZoom(manager: CameraManager, option: LensOption) {
-        lensButton.text = option.label
+        refreshLensChips()
         var lo = 1f
         var hi = 1f
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
@@ -154,6 +153,7 @@ class MainActivity : AppCompatActivity() {
         zoomMax = maxOf(hi, lo)
         zoomRatio = zoomRatio.coerceIn(zoomMin, zoomMax)
         zoomBar.isEnabled = zoomMax > zoomMin
+        android.util.Log.i("nostrobe", "zoom range %.2f..%.2f (logical %.2f..%.2f) lens=%s".format(zoomMin, zoomMax, lo, hi, option.label))
         zoomBar.progress = if (zoomMax > zoomMin) {
             (100f * ln(zoomRatio / zoomMin) / ln(zoomMax / zoomMin)).toInt()
         } else 0
@@ -167,6 +167,62 @@ class MainActivity : AppCompatActivity() {
         if (requestCode == 1 && grantResults.firstOrNull() == PackageManager.PERMISSION_GRANTED &&
             surfaceView.holder.surface.isValid && camera == null
         ) startCamera()
+    }
+
+    private fun selectLens(index: Int) {
+        if (index == lensIndex || index !in lensOptions.indices) return
+        lensIndex = index
+        zoomRatio = 1f
+        camera?.stop(); startCamera()
+    }
+
+    /** Back <-> front. Going back, return to the lens used last on the back. */
+    private var lastBackIndex = -1
+    private fun flipCamera() {
+        if (lensOptions.isEmpty()) return
+        val isFront = lensOptions[lensIndex].label.startsWith("front")
+        if (isFront) {
+            selectLens(if (lastBackIndex in lensOptions.indices) lastBackIndex else LensOptions.defaultIndex(lensOptions))
+        } else {
+            lastBackIndex = lensIndex
+            val front = lensOptions.indexOfFirst { it.label.startsWith("front") }
+            if (front >= 0) selectLens(front)
+        }
+    }
+
+    /** One chip per lens, labelled by magnification relative to the main lens (0.5x, 1x, 5x). */
+    private fun refreshLensChips() {
+        lensRow.removeAllViews()
+        val main = lensOptions.getOrNull(LensOptions.defaultIndex(lensOptions))?.equivMm ?: 0.0
+        for ((i, o) in lensOptions.withIndex()) {
+            if (o.label.startsWith("front")) continue
+            val text = when {
+                o.physicalId == null && o.equivMm == 0.0 -> "auto"
+                main > 0 && o.equivMm > 0 -> {
+                    val m = o.equivMm / main
+                    (if (m >= 10 || Math.abs(m - Math.round(m)) < 0.05) "%.0f" else "%.1f").format(m) + "x"
+                }
+                else -> o.label
+            }
+            val b = Button(this).apply {
+                this.text = text
+                minWidth = 0
+                minimumWidth = 0
+                isAllCaps = false
+                alpha = if (i == lensIndex) 1f else 0.55f
+                setOnClickListener { selectLens(i) }
+            }
+            lensRow.addView(b)
+        }
+        flipButton.text = if (lensOptions[lensIndex].label.startsWith("front")) "back" else "front"
+    }
+
+    private fun stepZoom(factor: Float) {
+        if (zoomMax <= zoomMin) return
+        zoomRatio = (zoomRatio * factor).coerceIn(zoomMin, zoomMax)
+        zoomBar.progress = (100f * ln(zoomRatio / zoomMin) / ln(zoomMax / zoomMin)).toInt()
+        zoomText.text = "%.1fx".format(zoomRatio)
+        camera?.setZoom(zoomRatio)
     }
 
     private fun toggleRecord() {
