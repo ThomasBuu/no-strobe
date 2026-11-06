@@ -1,0 +1,38 @@
+name: AntiStrobe
+options:
+  bundleIdPrefix: dev.nostrobe
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+    IPHONEOS_DEPLOYMENT_TARGET: "18.0"
+targets:
+  AntiStrobe:
+    type: application
+    platform: iOS
+    sources: [AntiStrobe]
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: dev.nostrobe.antistrobe
+        CODE_SIGN_STYLE: Automatic
+        TARGETED_DEVICE_FAMILY: "1"
+        GENERATE_INFOPLIST_FILE: YES
+        INFOPLIST_KEY_CFBundleDisplayName: Anti-strobe
+        INFOPLIST_KEY_UILaunchScreen_Generation: YES
+        INFOPLIST_KEY_UISupportedInterfaceOrientations: UIInterfaceOrientationPortrait
+        INFOPLIST_KEY_NSCameraUsageDescription: "La caméra filme à 240 images/s pour retirer les images éclairées par un strobe."
+        INFOPLIST_KEY_NSMicrophoneUsageDescription: "Le micro enregistre le son de la vidéo."
+        INFOPLIST_KEY_NSPhotoLibraryAddUsageDescription: "La vidéo nettoyée est enregistrée dans ta photothèque."
+  Flasher:
+    type: application
+    platform: iOS
+    sources: [Flasher]
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: dev.nostrobe.strobeflasher
+        CODE_SIGN_STYLE: Automatic
+        TARGETED_DEVICE_FAMILY: "1"
+        GENERATE_INFOPLIST_FILE: YES
+        INFOPLIST_KEY_CFBundleDisplayName: Strobe
+        INFOPLIST_KEY_UILaunchScreen_Generation: YES
+        INFOPLIST_KEY_UISupportedInterfaceOrientations: UIInterfaceOrientationPortrait
+        INFOPLIST_KEY_NSCameraUsageDescription: "La torche fait partie de la caméra : iOS demande cette autorisation pour la faire clignoter."
