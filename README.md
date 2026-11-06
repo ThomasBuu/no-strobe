@@ -69,32 +69,56 @@ banding pattern.
 ## Layout
 
 ```
-crates/ns-core/    platform-free algorithm (no deps)
-  camera.rs        sensor limits (exposure range, rolling-shutter sustain, fps, iso)
-  signal.rs        frame ring buffer, detrend, pulse detection
-  detector.rs      autocorrelation period search, pulse phase fit, drift tracking
-  solver.rs        candidate exposure/fps modes + scoring
-  controller.rs    strobe path: Search → Locked, per-frame Command
-  pwm.rs           FFT, autocorrelation frequency estimate, banding amplitude, synthetic profile
-  pwm_controller.rs PWM path: Search → Hill → Locked → Recalib
-  restorer.rs      post-processing: per-frame gain, per-row gain
-crates/ns-ffi/     C API (cbindgen header) + JNI for Android
-include/no_strobe.h
-platform/android/          Gradle app (settings.gradle, app/build.gradle)
+Cargo.toml             workspace: ns-core, ns-ffi, ns-post
+cbindgen.toml          C header generation
+crates/ns-core/        platform-free algorithm (no deps)
+  src/lib.rs         module list, the public API of the crate
+  src/camera.rs        sensor limits (exposure range, rolling-shutter sustain, fps, iso)
+  src/signal.rs        frame ring buffer, detrend, pulse detection
+  src/detector.rs      autocorrelation period search, pulse phase fit, drift tracking
+  src/solver.rs        candidate exposure/fps modes + scoring
+  src/controller.rs    strobe path: Search → Locked, per-frame Command
+  src/pwm.rs           autocorrelation frequency estimate, banding metrics, synthetic profile
+  src/pwm_controller.rs PWM path: Search → Hill → Locked → Recalib
+  src/restorer.rs      post-processing: per-frame gain, per-row gain
+  examples/            13 traces and probes: demo, pwm_demo, sweep_demo, deflicker,
+                       strobe_frames, gen_frames, diag, blind_trace, drift_trace,
+                       lag_probe, metric_probe, pulse_probe, led_blink
+  tests/               sync.rs, pwm.rs, restorer.rs
+crates/ns-ffi/         C API (cbindgen header) + JNI for Android
+crates/ns-post/        no-strobe-post: fix.rs (clip fix, streaming ffmpeg pipes),
+                       serve.rs (HTTP server the phone offloads to), main.rs (CLI)
+include/no_strobe.h    generated C header
+platform/android/      Gradle app (settings.gradle, app/build.gradle)
   app/src/main/java/dev/nostrobe/
     NsJni.kt                JNI bridge, SyncController, PwmSyncController
     LumaExtractor.kt        mean luma of a YUV_420_888 frame
     LineProfileExtractor.kt per-row luma profile + row readout rate
     Camera2Sync.kt          CameraCharacteristics limits + per-frame CaptureRequest
-    NoStrobeCamera.kt       capture session, per-frame loop, re-apply on change
-    MainActivity.kt         preview, status line, record button
-  res/layout/main.xml
+    NoStrobeCamera.kt       capture session, per-frame loop, high-speed session,
+                            profile dump for offline study
+    MainActivity.kt         preview, status line, record button, settings, gallery
+    AspectFrameLayout.kt    viewfinder box that keeps the frame's own aspect ratio
+    LensOptions.kt          lens chips: pin one lens of a logical multi-camera
+    GridOverlay.kt          rule-of-thirds grid drawn over the preview
+    OnDevicePost.kt         fix a clip on the phone (MediaCodec, temporal gain only)
+    DesktopPost.kt          POST a clip to no-strobe-post serve
+  app/src/main/res/
+    layout/main.xml         phone layout
+    layout-w700dp/main.xml  wide layout (foldable opened flat, tablet): viewfinder + settings
+    drawable/               capture button (idle, recording), focus ring
+  app/src/main/jniLibs/<abi>/libns_ffi.so   build output, not tracked (arm64-v8a, armeabi-v7a)
 platform/ios/swift/
   NsBridge.swift          C API wrapper (bridging header)
   LumaExtractor.swift     mean luma of a YUV pixel buffer
   LineProfileExtractor.swift per-row luma profile
   AvfSync.swift           AVCaptureDevice limits + per-frame exposure
   NoStrobeCamera.swift    capture session, per-frame loop, re-apply on change
+tools/
+  screen_flicker.py       white/black alternation at a set Hz (Tkinter)
+  make_flicker_video.py   flicker clip through ffmpeg, prints the rate it produces
+  adb_tap.py              tap an Android control by text/content-desc (uiautomator)
+  postprocess.sh          script-only clip fix (ffmpeg + the deflicker example)
 ```
 
 ## Per-frame loop
