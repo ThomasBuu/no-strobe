@@ -10,9 +10,8 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
-env:
-  # The NDK version installed by the sdkmanager step below.
-  NDK_VERSION: 26.2.11346918
+permissions:
+  contents: write
 
 jobs:
   # The platform-free core: the flicker measurement, the controller, the restorer.
@@ -52,28 +51,28 @@ jobs:
           distribution: temurin
           java-version: '17'
       # The runner image ships the Android SDK (ANDROID_HOME) with cmdline-tools/latest,
-      # platform 34, build-tools and several NDK versions. android-actions/setup-android@v3
-      # was tried and failed (it asks sdkmanager for the legacy 'tools' package, gone from
-      # the repository), and installing ndk;26.2.11346918 also failed ("Failed to find
-      # package"): the runner's SDK index does not list that version. Take the newest NDK
-      # the image already has, and install one only if the image has none.
+      # platform 34, build-tools and several NDK versions under $ANDROID_HOME/ndk.
+      # Take the newest NDK the image already has, or fall back to ANDROID_NDK_ROOT.
       - name: Pick the NDK the runner has
         run: |
-          if [ -n "$(ls -1 "$ANDROID_HOME/ndk" 2>/dev/null)" ]; then
+          if [ -d "$ANDROID_HOME/ndk" ] && [ -n "$(ls -1 "$ANDROID_HOME/ndk" 2>/dev/null)" ]; then
             v=$(ls -1 "$ANDROID_HOME/ndk" | sort -V | tail -1)
+            ndk_dir="$ANDROID_HOME/ndk/$v"
+          elif [ -n "$ANDROID_NDK_ROOT" ] && [ -d "$ANDROID_NDK_ROOT" ]; then
+            ndk_dir="$ANDROID_NDK_ROOT"
           else
             v=$(yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --list 2>/dev/null \
                 | grep -oE '^ndk;[0-9]+\.[0-9]+\.[0-9]+' | tail -1 | cut -d';' -f2)
             yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "ndk;$v"
+            ndk_dir="$ANDROID_HOME/ndk/$v"
           fi
-          echo "NDK_VERSION=$v" >> $GITHUB_ENV
-          echo "NDK: $v"
+          echo "ANDROID_NDK_HOME=$ndk_dir" >> $GITHUB_ENV
+          echo "ANDROID_NDK_ROOT=$ndk_dir" >> $GITHUB_ENV
+          echo "NDK path: $ndk_dir"
       - run: cargo install cargo-ndk --locked
       - name: Build libns_ffi.so for both ABIs
         run: cargo ndk -t arm64-v8a -t armeabi-v7a -o platform/android/app/src/main/jniLibs \
             build -p ns-ffi --release --features android
-        env:
-          ANDROID_NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/${{ env.NDK_VERSION }}
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '9.5.1'
