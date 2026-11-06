@@ -413,14 +413,12 @@ class MainActivity : AppCompatActivity() {
         val map = manager.getCameraCharacteristics(option.logicalId)
             .get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP) ?: return null
         val ranges = try { map.highSpeedVideoFpsRanges } catch (_: Exception) { return null }
-        val fixed = ranges.filter { it.lower == it.upper && it.upper >= 100 && it.upper <= 0.9 * hz }
-            .sortedByDescending { it.upper }
-        for (r in fixed) {
-            val size = map.getHighSpeedVideoSizesFor(r)
-                .filter { it.height <= 1080 }.maxByOrNull { it.width.toLong() * it.height } ?: continue
-            return Triple(r.upper, size.width, size.height)
-        }
-        return null
+        return HighSpeedPick.pick(
+            ranges.map { HighSpeedPick.FpsRange(it.lower, it.upper) },
+            { r -> map.getHighSpeedVideoSizesFor(android.util.Range(r.lower, r.upper))
+                .map { HighSpeedPick.Size(it.width, it.height) } },
+            hz
+        )
     }
 
     private fun selectLens(index: Int) {

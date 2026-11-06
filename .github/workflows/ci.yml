@@ -1,0 +1,76 @@
+name: CI
+
+on:
+  push:
+    branches: [main, test-for-android]
+  pull_request:
+
+# One run per push; an old run of the same branch is cancelled.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # The NDK version installed by the sdkmanager step below.
+  NDK_VERSION: 26.2.11346918
+
+jobs:
+  # The platform-free core: the flicker measurement, the controller, the restorer.
+  core:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo test --workspace
+
+  # The Kotlin side that does not need a camera: the frame rate the flicker allows, and the
+  # exposure that fits the frame.
+  kotlin-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '9.5.1'
+      - run: gradle :app:testDebugUnitTest
+        working-directory: platform/android
+
+  # The APK: native library for both ABIs, then the Gradle build. Published as the nightly release.
+  apk:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android, armv7-linux-androideabi
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: android-actions/setup-android@v3
+      - name: Install the NDK
+        run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "ndk;$NDK_VERSION"
+      - run: cargo install cargo-ndk --locked
+      - name: Build libns_ffi.so for both ABIs
+        run: cargo ndk -t arm64-v8a -t armeabi-v7a -o platform/android/app/src/main/jniLibs \
+            build -p ns-ffi --release --features android
+        env:
+          ANDROID_NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/${{ env.NDK_VERSION }}
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '9.5.1'
+      - name: Build the APK
+        run: gradle :app:assembleDebug
+        working-directory: platform/android
+      - name: Publish the nightly release
+        if: github.ref == 'refs/heads/main'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: nightly
+          name: Nightly build
+          prerelease: true
+          files: platform/android/app/build/outputs/apk/debug/app-debug.apk
