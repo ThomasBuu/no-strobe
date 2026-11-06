@@ -52,11 +52,22 @@ jobs:
           distribution: temurin
           java-version: '17'
       # The runner image ships the Android SDK (ANDROID_HOME) with cmdline-tools/latest,
-      # platform 34 and build-tools. android-actions/setup-android@v3 was tried and failed:
-      # it downloads cmdline-tools 16.0 and then asks sdkmanager for the legacy 'tools'
-      # package, which is no longer in the SDK repository ("Failed to find package 'tools'").
-      - name: Install the NDK
-        run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "ndk;$NDK_VERSION"
+      # platform 34, build-tools and several NDK versions. android-actions/setup-android@v3
+      # was tried and failed (it asks sdkmanager for the legacy 'tools' package, gone from
+      # the repository), and installing ndk;26.2.11346918 also failed ("Failed to find
+      # package"): the runner's SDK index does not list that version. Take the newest NDK
+      # the image already has, and install one only if the image has none.
+      - name: Pick the NDK the runner has
+        run: |
+          if [ -n "$(ls -1 "$ANDROID_HOME/ndk" 2>/dev/null)" ]; then
+            v=$(ls -1 "$ANDROID_HOME/ndk" | sort -V | tail -1)
+          else
+            v=$(yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --list 2>/dev/null \
+                | grep -oE '^ndk;[0-9]+\.[0-9]+\.[0-9]+' | tail -1 | cut -d';' -f2)
+            yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "ndk;$v"
+          fi
+          echo "NDK_VERSION=$v" >> $GITHUB_ENV
+          echo "NDK: $v"
       - run: cargo install cargo-ndk --locked
       - name: Build libns_ffi.so for both ABIs
         run: cargo ndk -t arm64-v8a -t armeabi-v7a -o platform/android/app/src/main/jniLibs \
