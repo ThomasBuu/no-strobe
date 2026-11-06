@@ -327,5 +327,10 @@ runs ffmpeg on what it receives and the token travels in clear text (plain HTTP)
 trusted network, or behind a VPN/tunnel such as Tailscale. `tools/postprocess.sh` remains as
 a script-only alternative.
 
+On the phone, the POST button offers "Fix on this phone" (decode, scale the luma by the
+temporal gain, re-encode with MediaCodec; no network, no banding gain, slower than a desktop)
+and "Send to the desktop and fix" (upload to `no-strobe-post serve`, address and token in the
+settings dialog). Both save the result next to the original in Movies/no-strobe.
+
 Limit: the gain is computed from each frame's own brightness, so a genuine fade or an
 auto-exposure change in the clip is flattened too.

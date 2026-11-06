@@ -432,11 +432,15 @@ class MainActivity : AppCompatActivity() {
     private fun prefs() = getSharedPreferences("nostrobe", MODE_PRIVATE)
 
     private fun showPostMenu() {
-        val items = arrayOf("Send to the desktop and fix", "Desktop server settings")
+        val items = arrayOf("Fix on this phone", "Send to the desktop and fix", "Desktop server settings")
         androidx.appcompat.app.AlertDialog.Builder(this)
             .setTitle("Post-process the last clip")
             .setItems(items) { _, which ->
-                if (which == 0) sendToDesktop() else showServerSettings()
+                when (which) {
+                    0 -> fixOnPhone()
+                    1 -> sendToDesktop()
+                    else -> showServerSettings()
+                }
             }
             .show()
     }
@@ -468,6 +472,42 @@ class MainActivity : AppCompatActivity() {
             }
             .setNegativeButton("Cancel", null)
             .show()
+    }
+
+    /** Brightness-pumping fix on the phone itself (no network); slower than the desktop. */
+    private fun fixOnPhone() {
+        val clip = lastClip
+        if (clip == null || !clip.exists()) {
+            Toast.makeText(this, "No clip to process yet.", Toast.LENGTH_SHORT).show(); return
+        }
+        val out = File(clip.parentFile, "clip-fixed.mp4")
+        postButton.isEnabled = false
+        Thread {
+            try {
+                val t0 = System.currentTimeMillis()
+                android.util.Log.i("nostrobe", "phone post: start (${clip.length()} bytes)")
+                OnDevicePost.fix(clip, out) { pct ->
+                    runOnUiThread { status.text = "post-processing on the phone: $pct %" }
+                }
+                val name = "nostrobe-" + java.text.SimpleDateFormat("yyyyMMdd-HHmmss", java.util.Locale.US)
+                    .format(java.util.Date()) + "-fixed.mp4"
+                android.util.Log.i("nostrobe", "phone post: done in ${System.currentTimeMillis() - t0} ms, ${out.length()} bytes")
+                val where = saveToGallery(out, name)
+                runOnUiThread {
+                    status.text = "post-processing done in ${(System.currentTimeMillis() - t0) / 1000} s"
+                    Toast.makeText(this, if (where != null) "Fixed clip saved: $where" else "Fixed clip ready",
+                        Toast.LENGTH_LONG).show()
+                }
+            } catch (e: Exception) {
+                android.util.Log.w("nostrobe", "phone post failed: ${e.javaClass.simpleName}: ${e.message}")
+                runOnUiThread {
+                    status.text = "post-processing failed"
+                    Toast.makeText(this, "Post-processing failed: ${e.message}", Toast.LENGTH_LONG).show()
+                }
+            } finally {
+                runOnUiThread { postButton.isEnabled = true }
+            }
+        }.start()
     }
 
     private fun sendToDesktop() {
