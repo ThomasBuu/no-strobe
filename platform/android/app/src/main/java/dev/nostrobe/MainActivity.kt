@@ -226,6 +226,10 @@ class MainActivity : AppCompatActivity() {
         requestCode: Int, permissions: Array<out String>, grantResults: IntArray,
     ) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode == 1 && grantResults.firstOrNull() != PackageManager.PERMISSION_GRANTED) {
+            Toast.makeText(this, "The camera permission is required.", Toast.LENGTH_LONG).show()
+            return
+        }
         if (requestCode == 1 && grantResults.firstOrNull() == PackageManager.PERMISSION_GRANTED &&
             surfaceView.holder.surface.isValid && camera == null
         ) startCamera()
@@ -247,6 +251,24 @@ class MainActivity : AppCompatActivity() {
                 focusRing.visibility = android.view.View.GONE
             }.start()
         }.start()
+    }
+
+    /** First camcorder profile the device has, 1080p preferred; null when it has none. */
+    private fun pickProfile(): CamcorderProfile? {
+        for (q in intArrayOf(CamcorderProfile.QUALITY_1080P, CamcorderProfile.QUALITY_720P,
+            CamcorderProfile.QUALITY_HIGH, CamcorderProfile.QUALITY_480P)) {
+            try {
+                if (CamcorderProfile.hasProfile(q)) return CamcorderProfile.get(q)
+            } catch (_: RuntimeException) {}
+        }
+        return null
+    }
+
+    /** Rotation to store in the clip so it plays upright (the screen is locked to portrait). */
+    private fun sensorOrientation(): Int {
+        val manager = getSystemService(CAMERA_SERVICE) as CameraManager
+        val id = lensOptions.getOrNull(lensIndex)?.logicalId ?: return 90
+        return manager.getCameraCharacteristics(id).get(CameraCharacteristics.SENSOR_ORIENTATION) ?: 90
     }
 
     private fun selectLens(index: Int) {
@@ -319,9 +341,7 @@ class MainActivity : AppCompatActivity() {
             return
         }
         // 1080p keeps the encoder and the lens stream manageable; QUALITY_HIGH can be 4K.
-        val quality = if (CamcorderProfile.hasProfile(CamcorderProfile.QUALITY_1080P))
-            CamcorderProfile.QUALITY_1080P else CamcorderProfile.QUALITY_HIGH
-        val p = CamcorderProfile.get(quality)
+        val p = pickProfile()
         val r = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) MediaRecorder(this) else MediaRecorder()
         // The call order matters: the source first, then the format, then the encoders.
         // Video only for now: audio would need the RECORD_AUDIO permission.
@@ -329,17 +349,22 @@ class MainActivity : AppCompatActivity() {
         r.setOutputFormat(MediaRecorder.OutputFormat.MPEG_4)
         // Cap the requested rate (the profile asks 33 Mbit/s at 1080p60). The Pixel's encoder
         // still overshoots on very noisy footage: measured ~143 Mbit/s in a dark scene.
-        r.setVideoEncodingBitRate(minOf(p.videoBitRate, MAX_VIDEO_BITRATE))
-        android.util.Log.i("nostrobe", "recorder: profile %d bps -> asked %d bps, %dx%d @ %d".format(p.videoBitRate, minOf(p.videoBitRate, MAX_VIDEO_BITRATE), p.videoFrameWidth, p.videoFrameHeight, p.videoFrameRate))
-        r.setVideoFrameRate(p.videoFrameRate)
-        r.setVideoSize(p.videoFrameWidth, p.videoFrameHeight)
+        // A device with no camcorder profile at all gets plain 720p30.
+        val rate = p?.videoBitRate ?: 8_000_000
+        val fps = p?.videoFrameRate ?: 30
+        val vw = p?.videoFrameWidth ?: 1280
+        val vh = p?.videoFrameHeight ?: 720
+        r.setVideoEncodingBitRate(minOf(rate, MAX_VIDEO_BITRATE))
+        android.util.Log.i("nostrobe", "recorder: profile %d bps -> asked %d bps, %dx%d @ %d".format(rate, minOf(rate, MAX_VIDEO_BITRATE), vw, vh, fps))
+        r.setVideoFrameRate(fps)
+        r.setVideoSize(vw, vh)
         r.setVideoEncoder(MediaRecorder.VideoEncoder.H264)
-        r.setOrientationHint(90)
-        r.setOutputFile(File(externalCacheDir, "clip.mp4").path)
+        r.setOrientationHint(sensorOrientation())
+        r.setOutputFile(File(externalCacheDir ?: cacheDir, "clip.mp4").path)
         r.prepare()
         recorder = r
         recordButton.isSelected = true
-        val w = java.io.FileWriter(File(externalCacheDir, "clip.csv"))
+        val w = java.io.FileWriter(File(externalCacheDir ?: cacheDir, "clip.csv"))
         w.write("timestamp_ns,exposure_ns,iso,luma,state,freq_hz,stale\n")
         pendingMeta = w
         // The recorder surface is added by the session, so rebuild it; the recorder starts
@@ -366,6 +391,7 @@ class MainActivity : AppCompatActivity() {
             NsJni.MODE_FLASH -> "flash"
             NsJni.MODE_PWM -> "pwm"
             NsJni.MODE_AUTO -> "auto (no flicker found)"
+            NsJni.MODE_UNSUPPORTED -> "auto (no manual exposure on this camera: post-processing only)"
             else -> "?"
         }
         val state = if (cmd.state == NsJni.STATE_LOCKED) "locked" else "search"

@@ -48,6 +48,8 @@ object NsJni {
     const val MODE_PWM = 3
     /** Not a controller mode: the app went back to auto-exposure (no flicker found). */
     const val MODE_AUTO = -1
+    /** The camera cannot do manual exposure: flicker sync is unavailable on this device. */
+    const val MODE_UNSUPPORTED = -2
     const val STATE_SEARCH = 0
     const val STATE_LOCKED = 1
 

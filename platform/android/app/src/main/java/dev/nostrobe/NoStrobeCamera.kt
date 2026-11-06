@@ -70,6 +70,9 @@ class NoStrobeCamera(
     private var staleFrames = 0
     private var lastAfState: Int? = null
     @Volatile private var stopped = false
+    // The device cannot (or does not) do manual exposure: the camera stays on auto-exposure
+    // and the app only records; the clip is fixed afterwards.
+    private var autoOnly = false
 
     // No flicker found: do not leave the sensor on short exposures and a maxed ISO (a dark,
     // noisy clip). After PROBE_MS without a lock the camera goes back to auto-exposure for
@@ -169,6 +172,11 @@ class NoStrobeCamera(
 
     fun start() {
         stopped = false
+        autoOnly = pwmMode && !Camera2Sync.supportsManualSensor(manager.getCameraCharacteristics(cameraId))
+        if (autoOnly) {
+            Log.w(TAG, "camera $cameraId has no MANUAL_SENSOR capability: flicker sync unavailable")
+            onStatus(unsupportedStatus())
+        }
         // A pinned lens has its own sensor: exposure range, readout time and stream sizes.
         val chars = manager.getCameraCharacteristics(physicalId ?: cameraId)
         val limits = Camera2Sync.limitsFromCharacteristics(chars)
@@ -383,6 +391,9 @@ class NoStrobeCamera(
         } else base
     }
 
+    private fun unsupportedStatus() = NsCommand(0.0, 0.0, 0.0, NsJni.MODE_UNSUPPORTED,
+        NsJni.STATE_SEARCH, 0.0, 0.0, 0.0)
+
     private fun onFrame(reader: ImageReader) {
         val image = try {
             reader.acquireLatestImage()
@@ -390,6 +401,7 @@ class NoStrobeCamera(
             return  // reader closed during shutdown
         } ?: return
         try {
+            if (autoOnly) return  // nothing to analyse: no manual exposure on this camera
             if (SystemClock.elapsedRealtime() < restUntilMs) return  // auto-exposure rest
             if (pwmMode && pwm == null) {
                 val limits = currentLimits()
@@ -424,7 +436,12 @@ class NoStrobeCamera(
                 recordFrame(image.timestamp, actualExposureNs(image.timestamp), last, -1.0, true)
                 if (staleFrames == 60) {
                     Log.w(TAG, "sensor ignores the requested exposure (asked $requestedExposureNs ns, " +
-                        "got ${actualExposureNs(image.timestamp)} ns): manual exposure unsupported in this mode?")
+                        "got ${actualExposureNs(image.timestamp)} ns): manual exposure unsupported in this mode, " +
+                        "back to auto-exposure for good")
+                    autoOnly = true
+                    fallBackToAuto(SystemClock.elapsedRealtime(), last ?: unsupportedStatus())
+                    onStatus(unsupportedStatus())
+                    return
                 }
                 return
             }
