@@ -34,6 +34,9 @@ const MIN_LUMA: f64 = 0.02;
 const VERIFY_RATIO: f64 = 0.5;
 const MIN_HZ: f64 = 100.0;
 const MAX_HZ: f64 = 5000.0;
+/// Frames to spend on one frame rate before dropping to the next: the profile has to be read
+/// at that rate long enough to measure its banding period.
+const SEARCH_FPS_FRAMES: usize = 24;
 
 #[derive(Clone, Copy, PartialEq)]
 enum Phase {
@@ -91,11 +94,17 @@ pub struct PwmController {
     verify_hi_e: f64,
     verify_lo_e: f64,
     verify_hi_m: f64,
+    /// Index into `supported_fps` while searching, and frames spent at the current one.
+    fps_idx: usize,
+    search_frames: usize,
+    period_rows: f64,
+    period_conf: f64,
 }
 
 impl PwmController {
     pub fn new(limits: CameraLimits, line_rate_hz: f64) -> Self {
         let fps = *limits.supported_fps.last().unwrap_or(&30.0);
+        let fps_idx = limits.supported_fps.len().saturating_sub(1);
         Self {
             limits,
             line_rate_hz,
@@ -127,6 +136,10 @@ impl PwmController {
             verify_hi_e: 0.0,
             verify_lo_e: 0.0,
             verify_hi_m: 0.0,
+            fps_idx,
+            search_frames: 0,
+            period_rows: 0.0,
+            period_conf: 0.0,
         }
     }
 
@@ -148,6 +161,11 @@ impl PwmController {
     }
 
     /// (best residual recorded at the lock, residual of the last frame).
+    /// Last banding period measured in rows, and its autocorrelation.
+    pub fn debug_period(&self) -> (f64, f64) {
+        (self.period_rows, self.period_conf)
+    }
+
     pub fn debug_residual(&self) -> (f64, f64) {
         (self.best_residual, self.residual_last)
     }
@@ -207,7 +225,7 @@ impl PwmController {
         self.profiles.push(profile.to_vec());
 
         match self.phase {
-            Phase::Search => self.search(),
+            Phase::Search => self.search(profile),
             Phase::Hill => self.hill(profile),
             Phase::Verify => self.verify(profile),
             Phase::Recalib => self.recalib(profile),
@@ -215,7 +233,7 @@ impl PwmController {
         }
     }
 
-    fn search(&mut self) -> crate::controller::Command {
+    fn search(&mut self, profile: &[f64]) -> crate::controller::Command {
         if self.profiles.len() < PROFILE_KEEP {
             return self.emit(self.limits.min_exposure_us, State::Search, 0.0);
         }
@@ -232,18 +250,44 @@ impl PwmController {
             }
             return self.emit(self.limits.min_exposure_us, State::Search, 0.0);
         }
-        // No row readout rate (iOS): hill-climb the banding metric. Its minima sit
-        // at exposures equal to k / f, so f is not needed to find them. Start at
-        // the geometric centre of the range so the climb can move both ways.
-        self.hill_base = (self.hill_min() * self.exposure_cap()).sqrt();
-        self.hill_exposure = self.hill_base;
-        self.hill_step = 1.25;
-        self.probe = 0;
-        self.probe_res = [0.0; 3];
-        self.flicker_seen = false;
-        self.phase = Phase::Hill;
-        self.emit(self.hill_exposure, State::Search, 0.0)
+        // No row readout rate (iOS, high-speed): the frame time is known because the controller
+        // sets the frame rate, so one row takes frame_us / rows. The banding period measured in
+        // rows gives the flicker period in microseconds, and the exposure that cancels it is a
+        // multiple of that. Scanning exposures cannot work: the nulls are one period apart, and
+        // a grid that does not know the period misses them.
+        let rows = profile.len() as f64;
+        let frame_us = 1e6 / self.fps;
+        let min_rows = rows * (1e6 / MAX_HZ) / frame_us;
+        // The profile must show at least three whole periods. A partial period autocorrelates
+        // well at a fraction of the true period (the bright pulse overlaps itself), and the
+        // controller then locks on a flicker that is three times too fast.
+        let max_rows = rows / 3.0;
+        if let Some((p, conf)) = pwm::estimate_period_rows(profile, min_rows, max_rows) {
+            self.period_rows = p;
+            self.period_conf = conf;
+            if conf > 0.3 && pwm::banding_amplitude(profile) > NOISE_FLOOR {
+                self.f_hz = 1e6 / (p * frame_us / rows);
+                self.confidence = conf;
+                self.flicker_seen = true;
+                self.search_frames = 0;
+                if let Some(e) = self.begin_hill() {
+                    return self.emit(e, State::Search, self.confidence);
+                }
+            }
+        }
+        // The banding period is longer than the frame, so the profile cannot show it: a period
+        // of 5 ms does not fit in a 4,17 ms frame at 240 fps. Drop to the next frame rate, which
+        // reads the frame slower and shows more periods. `begin_hill` still picks the highest
+        // frame rate the period fits, so the descent only finds the period, it does not choose it.
+        self.search_frames += 1;
+        if self.search_frames >= SEARCH_FPS_FRAMES {
+            self.search_frames = 0;
+            self.fps_idx = self.fps_idx.saturating_sub(1);
+            self.fps = self.limits.supported_fps[self.fps_idx];
+        }
+        self.emit(self.limits.min_exposure_us, State::Search, 0.0)
     }
+
 
     /// Hill climb on the banding metric toward the exposure `k / f`.
     ///
@@ -370,7 +414,7 @@ impl PwmController {
         self.frames_since_check += 1;
         let stale = self.frames_since_check >= CHECK_FRAMES;
         let degraded = residual > self.best_residual * (1.0 + RESIDUAL_TOLERANCE)
-            && residual > 0.01;
+            && residual > NOISE_FLOOR;
         // Blind mode: re-centre only when the banding really grew. A periodic re-centre probes
         // at +-2 % (and +-4 % right after a scale-up), and every probe changes the exposure the
         // sensor uses, so a recording shows a brightness step each time. Once the base sits on
@@ -412,8 +456,17 @@ impl PwmController {
     /// and below. Noise gives a "minimum" that is no lower than its surroundings.
     fn begin_verify(&mut self) -> crate::controller::Command {
         self.verify_centre = self.probe_res.iter().cloned().fold(f64::INFINITY, f64::min);
-        self.verify_hi_e = (self.hill_base * 1.25).min(self.exposure_cap());
-        self.verify_lo_e = (self.hill_base / 1.25).max(self.hill_min());
+        // Probe half a period away: k*f + T/2 is a half-integer multiple of the period, so its
+        // banding is at maximum. A +-25 % probe can land on another null (0.25*k*f is a multiple
+        // of T when k is a multiple of 4), and then the deep test compares two nulls and says
+        // nothing.
+        let off = if self.f_hz > 0.0 {
+            5e5 / self.f_hz
+        } else {
+            self.hill_base * 0.25
+        };
+        self.verify_hi_e = (self.hill_base + off).min(self.exposure_cap());
+        self.verify_lo_e = (self.hill_base - off).max(self.hill_min());
         self.verify_stage = 0;
         self.verify_frames = 0;
         self.trial_acc = 0.0;

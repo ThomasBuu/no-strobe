@@ -162,10 +162,59 @@ fn phone_limits() -> CameraLimits {
     CameraLimits {
         min_exposure_us: 20.0,
         max_exposure_us: 157_076.0,
-        sustain_us: 0.0,
+        // The 1080p readout of the Xperia: 1080 rows at 40 kHz = 27 ms. The profile here has 512
+        // rows read at 40 kHz, so the readout is 12,8 ms and one row is 25 us.
+        sustain_us: 12_800.0,
         supported_fps: vec![30.0],
         min_iso: 75.0,
         max_iso: 9618.0,
+    }
+}
+
+/// The high-speed surface list the Xperia reports for 1080p: up to 240 fps.
+fn high_speed_limits() -> CameraLimits {
+    CameraLimits {
+        min_exposure_us: 20.0,
+        max_exposure_us: 157_076.0,
+        sustain_us: 0.0,
+        supported_fps: vec![30.0, 60.0, 120.0, 240.0],
+        min_iso: 75.0,
+        max_iso: 9618.0,
+    }
+}
+
+#[test]
+fn highest_frame_rate_that_fits_the_period_is_chosen() {
+    // Paul's rule for high-speed recording: fps <= f, k = 1. At 500 Hz the period is 2 ms and a
+    // 240 fps frame is 4,17 ms, so 240 fits; at 200 Hz the period is 5 ms and 240 fps cannot
+    // hold one period plus the readout, so the climb must drop to 120 fps, not stay at 240.
+    for (f_hz, want_fps) in [(500.0, 240.0), (200.0, 120.0), (100.0, 60.0)] {
+        let mut c = PwmController::new(high_speed_limits(), 0.0);
+        let mut phase = 0.0;
+        // The rows of a frame are read across the frame, so the row rate is rows x fps. The
+        // controller measures the banding period in rows and converts it with the frame time, so
+        // the profile has to be read at the frame rate the controller commanded.
+        let mut last = c.on_profile(&profile_for(1000.0, f_hz, phase, 0.3, ROWS as f64 * 240.0, ROWS));
+        let mut got = None;
+        for _ in 0..900 {
+            phase += 0.0137;
+            let line_rate = ROWS as f64 * last.fps;
+            last = c.on_profile(&profile_for(last.exposure_us, f_hz, phase, 0.3, line_rate, ROWS));
+            if last.state == State::Locked {
+                got = Some(last);
+                break;
+            }
+        }
+        let cmd = got.unwrap_or_else(|| panic!("never locked at {f_hz} Hz"));
+        let t_us = 1e6 / f_hz;
+        let k = (cmd.exposure_us / t_us).round();
+        assert_eq!(cmd.fps, want_fps, "{f_hz} Hz picked {} fps", cmd.fps);
+        assert!(
+            cmd.exposure_us + 1e6 / cmd.fps >= cmd.exposure_us,
+            "frame must hold the exposure"
+        );
+        assert!((cmd.exposure_us - k * t_us).abs() < 0.02 * t_us, "{f_hz} Hz: {} us is not k/f", cmd.exposure_us);
+        assert!(1e6 / cmd.fps >= cmd.exposure_us, "exposure longer than the frame at {f_hz} Hz");
     }
 }
 

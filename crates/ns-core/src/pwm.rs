@@ -110,6 +110,72 @@ fn autocorr(x: &[f64], lag: usize) -> f64 {
         .sum()
 }
 
+/// Banding period in rows, from the profile's autocorrelation.
+///
+/// The rows of a frame are read in `frame_us`, so `rows` rows span the frame time and one row
+/// takes `frame_us / rows`. A period of `p` rows is a flicker period of `p * frame_us / rows`
+/// microseconds. The row time is never measured: it cancels between the profile and the frame.
+pub fn estimate_period_rows(profile: &[f64], min_rows: f64, max_rows: f64) -> Option<(f64, f64)> {
+    let n = profile.len();
+    if n < 8 {
+        return None;
+    }
+    let mean = profile.iter().sum::<f64>() / n as f64;
+    let x: Vec<f64> = profile.iter().map(|v| v - mean).collect();
+    let lo = (min_rows.ceil() as usize).max(2);
+    let hi = (max_rows.floor() as usize).min(n / 2);
+    if lo > hi {
+        return None;
+    }
+    let norm = x.iter().map(|v| v * v).sum::<f64>();
+    if norm <= 0.0 {
+        return None;
+    }
+    let mut c = Vec::with_capacity(hi - lo + 1);
+    for lag in lo..=hi {
+        c.push(autocorr(&x, lag) / norm);
+    }
+    if c.len() < 3 {
+        return None;
+    }
+    // The correlation of a smooth profile is high at small lags: two rows inside one bright
+    // pulse read the same light. The period is not the global maximum, it is the first peak
+    // after the first trough - the lag where the pattern lines up with itself once.
+    let mut trough = None;
+    for i in 1..c.len() - 1 {
+        if c[i] < c[i - 1] && c[i] <= c[i + 1] {
+            trough = Some(i);
+            break;
+        }
+    }
+    let start = match trough {
+        Some(i) => i + 1,
+        None => 1,
+    };
+    let mut peak = None;
+    for i in start..c.len() - 1 {
+        if c[i] > c[i - 1] && c[i] >= c[i + 1] {
+            peak = Some(i);
+            break;
+        }
+    }
+    let idx = match peak {
+        Some(i) => i,
+        // No peak inside the range: the period is longer than the frame shows.
+        None => return None,
+    };
+    let best_c = c[idx];
+    if best_c <= 0.0 {
+        return None;
+    }
+    let left = if idx > 0 { c[idx - 1] } else { best_c };
+    let right = if idx + 1 < c.len() { c[idx + 1] } else { best_c };
+    let denom = left - 2.0 * best_c + right;
+    let shift = if denom.abs() > 1e-12 { (left - right) / (2.0 * denom) } else { 0.0 };
+    let p = (idx as f64 + lo as f64 + shift).clamp(lo as f64, hi as f64);
+    Some((p, best_c))
+}
+
 /// Exposure that integrates `k` whole flicker cycles, in microseconds.
 pub fn exposure_for_k(f_hz: f64, k: u32) -> f64 {
     1e6 * k as f64 / f_hz
@@ -147,10 +213,17 @@ pub fn banding_metric(profile: &[f64], exposure_us: f64) -> f64 {
 /// Banding amplitude of a profile: standard deviation after detrending.
 /// Zero means the exposure integrates a whole number of flicker cycles.
 pub fn banding_amplitude(profile: &[f64]) -> f64 {
+    banding_amplitude_window(profile, profile.len() / 4 | 1)
+}
+
+/// Same, with the detrend window in rows. A window shorter than a few flicker periods eats
+/// part of the banding itself, so the amplitude of a short exposure is not comparable to the
+/// amplitude of a long one: the scan needs a window of several periods.
+pub fn banding_amplitude_window(profile: &[f64], window: usize) -> f64 {
     if profile.len() < 4 {
         return 0.0;
     }
-    let d = detrend(profile, profile.len() / 4 | 1);
+    let d = detrend(profile, window.max(1) | 1);
     let m = d.iter().sum::<f64>() / d.len() as f64;
     (d.iter().map(|v| (v - m) * (v - m)).sum::<f64>() / d.len() as f64).sqrt()
 }
