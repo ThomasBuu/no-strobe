@@ -125,6 +125,8 @@ pub struct PwmController {
     scan_frames: Vec<Vec<f64>>,
     scan_cands: Vec<f64>,
     scan_window: Option<(f64, f64)>,
+    /// Flicker frequency estimated from the spacing of the scan nulls (0 while searching).
+    f_est_hz: f64,
 }
 
 impl PwmController {
@@ -178,6 +180,7 @@ impl PwmController {
             scan_frames: Vec::new(),
             scan_cands: Vec::new(),
             scan_window: None,
+            f_est_hz: 0.0,
         }
     }
 
@@ -190,6 +193,48 @@ impl PwmController {
     }
 
     pub fn frequency_hz(&self) -> f64 {
+        // The row measurement is the period itself. The spacing of the scan nulls is a guess, and
+        // it breaks when the deepest scan candidates are short-exposure noise minima: measured at
+        // 100 Hz, locked at 10000 us (k=1), the median spacing of the four candidates gave 5714 Hz.
+        // The spacing is used only when the profile could not show the period (a period longer
+        // than the frame, so the row autocorrelation has nothing to find).
+        if self.f_from_rows {
+            return self.f_hz;
+        }
+        // Only a lock gives a frequency: during the scan the commanded exposure is a probe, and
+        // 1 / it is noise (the tests check that no frequency is invented from a flat scene).
+        if self.phase != Phase::Locked && self.phase != Phase::Recalib {
+            return self.f_hz;
+        }
+        if self.f_hz > 0.0 && self.last_exposure > 0.0 {
+            // The controller's own frequency estimate is what the lock was built on: the locked
+            // exposure is k / f_hz, so if k is a whole number the estimate is the period. Measured
+            // with a 500 Hz light the controller locks at 28001 us (k=14), so f_hz = 500 is
+            // confirmed by the lock, and 1 / 28001 us (35.7 Hz) would be 14 times too low - the
+            // app's high-speed choice needs fps <= 0.9 f, so 35.7 Hz kills the 240 fps path.
+            let k = self.last_exposure * self.f_hz / 1e6;
+            if (k - k.round()).abs() < 0.1 {
+                return self.f_hz;
+            }
+        }
+        if self.f_est_hz > 0.0 && self.last_exposure > 0.0 {
+            // The locked exposure is a whole number of flicker periods, so it must be a multiple
+            // of the spacing the scan found. If it is not, the scan's minima were noise: 100 Hz
+            // locked at 10000 us, the scan minima gave a spacing of 175 us (5714 Hz), and
+            // 10000 x 5714 / 1e6 = 57.14 is not a whole number of periods.
+            let k = self.last_exposure * self.f_est_hz / 1e6;
+            if (k - k.round()).abs() < 0.1 {
+                return self.f_est_hz;
+            }
+            // The scan's spacing is not the period. The safest number is 1 / the locked exposure:
+            // it is the period of the null the controller is sitting on, so the open-loop seed the
+            // app applies stays a null, and the high-speed choice is conservative (it picks no
+            // frame rate at all when this underestimates f).
+            return 1e6 / self.last_exposure;
+        }
+        if self.last_exposure > 0.0 {
+            return 1e6 / self.last_exposure;
+        }
         self.f_hz
     }
 
@@ -202,6 +247,21 @@ impl PwmController {
     /// Last banding period measured in rows, and its autocorrelation.
     pub fn debug_period(&self) -> (f64, f64) {
         (self.period_rows, self.period_conf)
+    }
+
+    /// The scan's candidate minima, in the order the scan found them.
+    pub fn debug_scan_cands(&self) -> Vec<f64> {
+        self.scan_cands.clone()
+    }
+
+    /// The exposure the controller last commanded, and the frequency the scan spacing gives.
+    pub fn debug_exposure(&self) -> (f64, f64) {
+        (self.last_exposure, self.f_est_hz)
+    }
+
+    /// The frequency the controller believes, and whether it came from the rows.
+    pub fn debug_f(&self) -> (f64, bool) {
+        (self.f_hz, self.f_from_rows)
     }
 
     pub fn debug_residual(&self) -> (f64, f64) {
@@ -304,6 +364,7 @@ impl PwmController {
         self.flicker_seen = false;
         self.trial_profiles.clear();
         self.scan_window = None;
+        self.f_est_hz = 0.0;
         self.scan_e = self.hill_min();
         self.scan_n = 0;
         self.scan_res.clear();
@@ -363,6 +424,27 @@ impl PwmController {
         // Best candidate last, so `pop` takes the deepest first; keep at most 4.
         let skip = cands.len().saturating_sub(4);
         self.scan_cands = cands.into_iter().skip(skip).map(|c| c.1).collect();
+        // The nulls are spaced by the flicker period: two minima 2 ms apart mean 500 Hz, and the
+        // locked exposure is k / f, not 1 / f. The app needs f for the high-speed choice (fps <= f)
+        // and for the seed; the hill alone only gives one null.
+        let mut es = self.scan_cands.clone();
+        es.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        if es.len() >= 2 {
+            let mut sp: Vec<f64> = es
+                .windows(2)
+                .map(|w| w[1] - w[0])
+                .filter(|d| *d > 0.0)
+                .collect();
+            sp.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+            // The largest gap, not the smallest: the false minima the scan finds at the short end
+            // (the metric's noise floor) cluster together, so their mutual spacing is far below the
+            // period, while the true nulls are one period apart. Measured: 100 Hz, candidates
+            // 175, 350, 525, 10000 us -> smallest spacing 175 gives 5714 Hz, largest 9475 gives
+            // 105 Hz. On the room lamp (98.7 Hz, minima 1000, 10000, 20000, 30000) the largest
+            // gap is 10000 -> 100 Hz.
+            let spacing = sp[sp.len() - 1];
+            self.f_est_hz = 1e6 / spacing;
+        }
         self.next_scan_candidate()
     }
 

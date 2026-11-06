@@ -139,29 +139,32 @@ pub fn estimate_period_rows(profile: &[f64], min_rows: f64, max_rows: f64) -> Op
         return None;
     }
     // The correlation of a smooth profile is high at small lags: two rows inside one bright
-    // pulse read the same light. The period is not the global maximum, it is the first peak
-    // after the first trough - the lag where the pattern lines up with itself once.
+    // pulse read the same light. The period is not the global maximum, it is the first positive
+    // peak after the profile has gone negative - the lag where the pattern lines up with itself
+    // once. A local maximum inside the negative plateau (the shallow wiggles of a flat region)
+    // is not a period: the peak must be positive, and the trough before it negative.
     let mut trough = None;
-    for i in 1..c.len() - 1 {
-        if c[i] < c[i - 1] && c[i] <= c[i + 1] {
+    for i in 0..c.len() - 1 {
+        if c[i] < 0.0 {
             trough = Some(i);
             break;
         }
     }
     let start = match trough {
         Some(i) => i + 1,
-        None => 1,
+        // Never negative: the profile is smooth (no banding), no period to find.
+        None => return None,
     };
     let mut peak = None;
     for i in start..c.len() - 1 {
-        if c[i] > c[i - 1] && c[i] >= c[i + 1] {
+        if c[i] > 0.0 && c[i] >= c[i - 1] && c[i] >= c[i + 1] {
             peak = Some(i);
             break;
         }
     }
     let idx = match peak {
         Some(i) => i,
-        // No peak inside the range: the period is longer than the frame shows.
+        // No positive peak inside the range: the period is longer than the frame shows.
         None => return None,
     };
     let best_c = c[idx];
