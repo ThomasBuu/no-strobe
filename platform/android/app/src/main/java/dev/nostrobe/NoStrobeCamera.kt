@@ -87,6 +87,7 @@ class NoStrobeCamera(
     private val resultExposure = HashMap<Long, Long>()
     private var staleFrames = 0
     private var lastAfState: Int? = null
+    private var lastFocusDiopters = -1f
     @Volatile private var stopped = false
     // The device cannot (or does not) do manual exposure: the camera stays on auto-exposure
     // and the app only records; the clip is fixed afterwards.
@@ -158,6 +159,13 @@ class NoStrobeCamera(
             request: CaptureRequest,
             result: TotalCaptureResult,
         ) {
+            // Where the lens really is (diopters; 0 = infinity): log changes, to check that a tap focuses.
+            result.get(CaptureResult.LENS_FOCUS_DISTANCE)?.let { d ->
+                if (lastFocusDiopters < 0f || Math.abs(d - lastFocusDiopters) > 0.15f * maxOf(1f, lastFocusDiopters)) {
+                    Log.i(TAG, "focus distance %.2f diopters (%s)".format(d, if (d > 0.01f) "%.2f m".format(1f / d) else "infinity"))
+                    lastFocusDiopters = d
+                }
+            }
             val af = result.get(CaptureResult.CONTROL_AF_STATE)
             if (af != lastAfState) {
                 lastAfState = af
