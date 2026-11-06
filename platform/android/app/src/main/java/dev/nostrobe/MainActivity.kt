@@ -6,6 +6,7 @@ import android.graphics.ImageFormat
 import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CameraManager
 import android.media.CamcorderProfile
+import android.media.MediaCodecList
 import android.media.MediaRecorder
 import android.os.Build
 import android.os.Bundle
@@ -529,8 +530,16 @@ class MainActivity : AppCompatActivity() {
             ?: (p?.videoFrameRate ?: 30)
         val vw = p?.videoFrameWidth ?: 1280
         val vh = p?.videoFrameHeight ?: 720
-        r.setVideoEncodingBitRate(if (hs != null) 60_000_000 else minOf(rate, MAX_VIDEO_BITRATE))
-        android.util.Log.i("nostrobe", "recorder: profile %d bps -> asked %d bps, %dx%d @ %d".format(rate, minOf(rate, MAX_VIDEO_BITRATE), vw, vh, fps))
+        // HEVC when the device has an encoder for it: at the same rate it keeps far less noise
+        // than H.264, which matters at ISO 1750 in a dark room (the Pixel 11's H.264 encoder
+        // measured ~143 Mbit/s on a noisy scene against the 30 Mbit/s asked). HEVC needs about
+        // 60 % of the H.264 rate for the same quality, so the cap is lowered with it.
+        val hevc = hevcEncoder()
+        val askBps = if (hs != null) 60_000_000
+        else if (hevc) minOf((rate * 0.6).toInt(), MAX_VIDEO_BITRATE) else minOf(rate, MAX_VIDEO_BITRATE)
+        r.setVideoEncodingBitRate(askBps)
+        android.util.Log.i("nostrobe", "recorder: profile %d bps -> asked %d bps, %s, %dx%d @ %d".format(
+            rate, askBps, if (hevc) "HEVC" else "H.264", vw, vh, fps))
         if (hs != null) {
             // High speed: the rate and size the camera lists, the capture rate = the frame rate
             // (real-time video, not slow motion), and a rate that fits a 240 fps stream.
@@ -544,7 +553,7 @@ class MainActivity : AppCompatActivity() {
             recFps = fps
             r.setVideoSize(vw, vh)
         }
-        r.setVideoEncoder(MediaRecorder.VideoEncoder.H264)
+        r.setVideoEncoder(if (hevc) MediaRecorder.VideoEncoder.HEVC else MediaRecorder.VideoEncoder.H264)
         if (withAudio) {
             r.setAudioEncoder(MediaRecorder.AudioEncoder.AAC)
             r.setAudioEncodingBitRate(128_000)
@@ -567,6 +576,10 @@ class MainActivity : AppCompatActivity() {
         // once the session is configured (MediaRecorder needs frames to flow to its surface).
         camera?.stop(); startCamera()
     }
+
+    /** An encoder for HEVC exists on this device (the Xperia 1 III and the Pixel 11 both do). */
+    private fun hevcEncoder(): Boolean =
+        MediaCodecList(MediaCodecList.REGULAR_CODECS).codecInfos.any { it.isEncoder && it.name == "video/hevc" }
 
     /** The clip is in the cache; copy it to Movies/no-strobe so the gallery sees it. */
     private fun finishClip() {
