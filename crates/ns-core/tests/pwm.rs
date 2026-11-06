@@ -278,3 +278,23 @@ fn noisy_blind_sweep_never_locks_on_a_false_minimum() {
         }
     }
 }
+
+#[test]
+fn locks_on_a_long_multiple_of_the_period_when_a_shutter_fraction_is_set() {
+    // 500 Hz at 30 fps: a 180 degree shutter is 16.7 ms, i.e. 8 periods of 2 ms.
+    let f_hz = 500.0;
+    let mut c = PwmController::new(phone_limits(), 0.0);
+    c.set_shutter_fraction(0.5);
+    let mut phase = 0.0;
+    let mut last = c.on_profile(&profile_for(1000.0, f_hz, phase, 0.3, LINE_RATE, ROWS));
+    for _ in 0..1500 {
+        phase += 0.0137;
+        last = c.on_profile(&profile_for(last.exposure_us, f_hz, phase, 0.3, LINE_RATE, ROWS));
+    }
+    assert_eq!(last.state, State::Locked);
+    let t_us = 1e6 / f_hz;
+    let k = (last.exposure_us / t_us).round();
+    assert!(k >= 6.0, "stayed on a short exposure: {} us (k = {k})", last.exposure_us);
+    assert!((last.exposure_us - k * t_us).abs() < 0.02 * t_us, "{} us is not a multiple of {t_us}", last.exposure_us);
+    assert!(last.exposure_us <= 1e6 / 30.0, "longer than a frame: {} us", last.exposure_us);
+}

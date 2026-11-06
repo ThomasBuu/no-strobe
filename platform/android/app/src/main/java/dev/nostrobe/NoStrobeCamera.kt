@@ -50,6 +50,15 @@ class NoStrobeCamera(
     private val simFlickerHz: Double = 0.0,
     /** Debug: behave like a camera without manual exposure. */
     private val forceAutoOnly: Boolean = false,
+    /** Debug: start the session ladder at this level (2 = no analysis stream). */
+    private val startLevel: Int = 0,
+    /** Frame rate the recorder was set to (the open-loop recording uses it). */
+    private val recordFps: Int = 30,
+    /** A lock found before this camera was reopened (to record): start on it, do not search. */
+    private val seedExposureUs: Double = 0.0,
+    private val seedHz: Double = 0.0,
+    /** Recording without a lock: stay on auto-exposure, probing exposures would ruin the clip. */
+    private val holdAutoNoSeed: Boolean = false,
     private val onStatus: (NsCommand) -> Unit,
 ) {
     private var device: CameraDevice? = null
@@ -84,6 +93,16 @@ class NoStrobeCamera(
     // noisy clip). After PROBE_MS without a lock the camera goes back to auto-exposure for
     // REST_MS, then probes again (the lights may have changed).
     private var surfaceList: List<Surface> = emptyList()
+    /** The lock in force right now (0 when searching), to carry over when the camera is reopened. */
+    @Volatile private var lockExposureUs = 0.0
+    @Volatile private var lockHz = 0.0
+    @Volatile private var lockAtMs = 0L
+
+    /** (exposure us, frequency Hz) of a lock seen in the last seconds, else (0, 0). A status of
+     *  "search" is interleaved with "locked" during re-checks, so the instant is not enough. */
+    fun carryLock(): Pair<Double, Double> =
+        if (lockHz > 0.0 && SystemClock.elapsedRealtime() - lockAtMs < LOCK_GRACE_MS) lockExposureUs to lockHz
+        else 0.0 to 0.0
     // The lens actually pinned by the session that is running (null: the logical camera).
     private var activePhysicalId: String? = null
     private var analysisSurface: Surface? = null
@@ -168,9 +187,10 @@ class NoStrobeCamera(
     }
 
     /** Exposure the sensor used for the frame with this timestamp, or the latest known. */
-    private fun actualExposureNs(timestamp: Long): Long = synchronized(resultExposure) {
-        resultExposure[timestamp] ?: latestResultExposureNs
-    }
+    private var matchHit = 0
+    private var matchMiss = 0
+    private var missRun = 0
+
 
     private fun exposureMatches(actualNs: Long, requestedNs: Long): Boolean {
         if (requestedNs <= 0L) return true
@@ -181,15 +201,33 @@ class NoStrobeCamera(
 
     fun start() {
         stopped = false
-        autoOnly = forceAutoOnly || (pwmMode && !Camera2Sync.supportsManualSensor(manager.getCameraCharacteristics(cameraId)))
+        // A 32-bit process on a 64-bit capable device (measured on a Xperia 1 III ROM): the
+        // framework aborts the whole process inside ImageReader's Image.getPlanes(), which
+        // cannot be caught. Those devices stay on auto-exposure and only record.
+        val risky32 = !android.os.Process.is64Bit() && Build.SUPPORTED_64_BIT_ABIS.isNotEmpty()
+        if (risky32) Log.w(TAG, "32-bit process on a 64-bit device: no flicker analysis (framework abort in getPlanes)")
+        val noProbe = holdAutoNoSeed && seedExposureUs <= 0.0
+        autoOnly = forceAutoOnly || risky32 || noProbe ||
+            (pwmMode && !Camera2Sync.supportsManualSensor(manager.getCameraCharacteristics(cameraId)))
         if (autoOnly) {
-            Log.w(TAG, "camera $cameraId has no MANUAL_SENSOR capability: flicker sync unavailable")
-            onStatus(unsupportedStatus())
+            if (noProbe) {
+                Log.i(TAG, "recording without a flicker lock: auto-exposure, no probing")
+                onStatus(NsCommand(0.0, 0.0, 0.0, NsJni.MODE_AUTO, NsJni.STATE_SEARCH, 0.0, 0.0, 0.0))
+            } else {
+                Log.w(TAG, "camera $cameraId has no MANUAL_SENSOR capability: flicker sync unavailable")
+                onStatus(unsupportedStatus())
+            }
         }
         // A pinned lens has its own sensor: exposure range, readout time and stream sizes.
         val chars = manager.getCameraCharacteristics(physicalId ?: cameraId)
         val limits = Camera2Sync.limitsFromCharacteristics(chars)
         sustainUs = limits.sustainUs
+        // Android 16: the app fixes the exposure time and the camera's AE picks the ISO
+        // (CONTROL_AE_PRIORITY_MODE). The keys are not in android.jar at compileSdk 34.
+        val prio = try {
+            chars.get(CameraCharacteristics.Key("android.control.aeAvailablePriorityModes", IntArray::class.java))
+        } catch (_: Exception) { null }
+        Log.i(TAG, "AE priority modes: ${prio?.joinToString(",") ?: "none"}")
         Log.i(TAG, "limits: exposure %.0f..%.0f us, sustain %.0f us, iso %.0f..%.0f, fps %s".format(
             limits.minExposureUs, limits.maxExposureUs, limits.sustainUs, limits.minIso, limits.maxIso,
             limits.supportedFps.joinToString(",")))
@@ -217,7 +255,14 @@ class NoStrobeCamera(
         val thread = HandlerThread("analysis").apply { start() }
         analysisThread = thread
         handler = Handler(thread.looper)
-        val r = ImageReader.newInstance(size.width, size.height, ImageFormat.YUV_420_888, 3)
+        // Ask for CPU-readable buffers: on some devices the default buffers of a 32-bit process
+        // cannot be mapped and Image.getPlanes() aborts the process inside the framework.
+        val r = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            ImageReader.newInstance(size.width, size.height, ImageFormat.YUV_420_888, 3,
+                android.hardware.HardwareBuffer.USAGE_CPU_READ_OFTEN)
+        } else {
+            ImageReader.newInstance(size.width, size.height, ImageFormat.YUV_420_888, 3)
+        }
         r.setOnImageAvailableListener({ reader -> onFrame(reader) }, handler)
         reader = r
         analysisSurface = r.surface
@@ -236,7 +281,7 @@ class NoStrobeCamera(
                 }
                 device = d
                 try {
-                    createSession(d, surfaces)
+                    createSession(d, surfaces, startLevel)
                 } catch (e: IllegalArgumentException) {
                     Log.w(TAG, "session not created: ${e.message}")
                     d.close(); device = null
@@ -253,6 +298,28 @@ class NoStrobeCamera(
                 device = null
             }
         }, null)
+    }
+
+    /**
+     * The OS image pipeline at its best: high-quality noise reduction, edge, hot-pixel,
+     * tone-map and aberration modes, when the camera lists them. The clip is meant to be
+     * post-processed, so the less the ISP smears it the better.
+     */
+    private fun applyQuality(b: CaptureRequest.Builder) {
+        val chars = manager.getCameraCharacteristics(cameraId)
+        fun hq(avail: CameraCharacteristics.Key<IntArray>, want: Int, key: CaptureRequest.Key<Int>) {
+            if (chars.get(avail)?.contains(want) == true) b.set(key, want)
+        }
+        hq(CameraCharacteristics.NOISE_REDUCTION_AVAILABLE_NOISE_REDUCTION_MODES,
+            CameraMetadata.NOISE_REDUCTION_MODE_HIGH_QUALITY, CaptureRequest.NOISE_REDUCTION_MODE)
+        hq(CameraCharacteristics.EDGE_AVAILABLE_EDGE_MODES,
+            CameraMetadata.EDGE_MODE_HIGH_QUALITY, CaptureRequest.EDGE_MODE)
+        hq(CameraCharacteristics.HOT_PIXEL_AVAILABLE_HOT_PIXEL_MODES,
+            CameraMetadata.HOT_PIXEL_MODE_HIGH_QUALITY, CaptureRequest.HOT_PIXEL_MODE)
+        hq(CameraCharacteristics.COLOR_CORRECTION_AVAILABLE_ABERRATION_MODES,
+            CameraMetadata.COLOR_CORRECTION_ABERRATION_MODE_HIGH_QUALITY, CaptureRequest.COLOR_CORRECTION_ABERRATION_MODE)
+        hq(CameraCharacteristics.TONEMAP_AVAILABLE_TONE_MAP_MODES,
+            CameraMetadata.TONEMAP_MODE_HIGH_QUALITY, CaptureRequest.TONEMAP_MODE)
     }
 
     private fun applyBias(b: CaptureRequest.Builder) {
@@ -378,7 +445,8 @@ class NoStrobeCamera(
         }
         if (level >= 2) {
             autoOnly = true
-            onStatus(unsupportedStatus())
+            // Starting at level 2 on purpose (recording) is not a device limitation.
+            if (startLevel < 2 || level > startLevel) onStatus(unsupportedStatus())
         }
         if (level == 1 && physicalId == null) {
             // Nothing was pinned at level 0, so level 1 would be the same request.
@@ -388,12 +456,17 @@ class NoStrobeCamera(
         for (s in surfaces) b.addTarget(s)
         applyZoom(b)
         applyBias(b)
+        applyQuality(b)
         builder = b
         val callback = object : CameraCaptureSession.StateCallback() {
             override fun onConfigured(s: CameraCaptureSession) {
                 session = s
                 s.setRepeatingRequest(b.build(), resultCallback, handler)
                 if (level < 3) onReady()
+                // Recording without the analysis stream: apply the lock found before as is.
+                if (level >= 2 && seedExposureUs > 0.0 && seedHz > 0.0) {
+                    handler?.postDelayed({ applySeededExposure() }, SEED_METER_MS)
+                }
             }
 
             override fun onConfigureFailed(s: CameraCaptureSession) {
@@ -434,6 +507,35 @@ class NoStrobeCamera(
         } else base
     }
 
+    /**
+     * Open loop: the camera has been on auto-exposure for a moment (the capture results gave
+     * the brightness budget, exposure x ISO), now the locked exposure goes in and the ISO is
+     * what keeps that brightness. No analysis stream is in the session, so nothing re-checks
+     * the lock until the recording ends.
+     */
+    private fun applySeededExposure() {
+        val b = builder ?: return
+        val sess = session ?: return
+        if (stopped) return
+        val budget = if (budgetUsIso > 0.0) budgetUsIso else latestAutoBudget
+        val iso = if (budget > 0.0) {
+            (budget * Math.pow(2.0, evBias.toDouble()) / seedExposureUs).coerceIn(isoMin, isoMax)
+        } else isoMin
+        val cmd = NsCommand(seedExposureUs, recordFps.toDouble(), iso, NsJni.MODE_PWM, NsJni.STATE_LOCKED,
+            1e6 / seedHz, 0.8, 0.0)
+        Camera2Sync.apply(b, cmd)
+        applyZoom(b)
+        applyQuality(b)
+        requestedExposureNs = (seedExposureUs * 1000.0).toLong()
+        try {
+            sess.setRepeatingRequest(b.build(), resultCallback, handler)
+            Log.i(TAG, "open loop: %.0f us at ISO %.0f (budget %.0f)".format(seedExposureUs, iso, budget))
+            onStatus(cmd)
+        } catch (e: Exception) {
+            Log.w(TAG, "open-loop exposure not applied: ${e.message}")
+        }
+    }
+
     private fun unsupportedStatus() = NsCommand(0.0, 0.0, 0.0, NsJni.MODE_UNSUPPORTED,
         NsJni.STATE_SEARCH, 0.0, 0.0, 0.0)
 
@@ -450,6 +552,16 @@ class NoStrobeCamera(
                 val limits = currentLimits()
                 lineRateHz = LineProfileExtractor.lineRate(image.height, sustainUs * 1000.0)
                 pwm = NsJni.createPwm(limits, lineRateHz)
+                // Long exposures on a multiple of the period (180 degree shutter) keep the ISO low.
+                // Longer still when the scene is dim enough that the ISO would pass ISO_SOFT_MAX
+                // (up to nearly a full frame): more motion blur, much less noise.
+                val frameUs = 1e6 / (limits.supportedFps.maxOrNull() ?: 30.0)
+                val needUs = if (budgetUsIso > 0.0) budgetUsIso / ISO_SOFT_MAX else 0.0
+                pwm!!.setShutterFraction((needUs / frameUs).coerceIn(SHUTTER_FRACTION, 0.95))
+                if (seedExposureUs > 0.0 && seedHz > 0.0) {
+                    Log.i(TAG, "starting locked: %.0f us at %.1f Hz".format(seedExposureUs, seedHz))
+                    pwm!!.seed(seedExposureUs, seedHz)
+                }
             }
             // Let the camera's auto-exposure settle first so the brightness budget is known
             // (about one second at 60 fps; the analysis has room for that).
@@ -458,10 +570,24 @@ class NoStrobeCamera(
                 if (autoWait < 60) return
                 budgetUsIso = latestAutoBudget  // AE never reported CONVERGED: use what we have
             }
+            // The exposure THIS frame was taken with: its own capture result, matched by sensor
+            // timestamp. On some devices the result arrives after the image (about 40 % of the
+            // frames on a Xperia 1 III and a Pixel 11 Pro Fold): using the latest known value
+            // instead made the closed loop chase a one-step-old exposure and drift. Such frames
+            // are dropped; if no frame ever matches (timestamps of another clock), fall back.
+            val frameExposureNs: Long = run {
+                val exact = synchronized(resultExposure) { resultExposure[image.timestamp] }
+                if (exact != null) {
+                    matchHit += 1; missRun = 0; exact
+                } else {
+                    matchMiss += 1; missRun += 1
+                    if (matchHit == 0 && missRun > 60) latestResultExposureNs else return
+                }
+            }
             // Skip frames still carrying the previous exposure; they would pollute the trial.
-            if (!exposureMatches(actualExposureNs(image.timestamp), requestedExposureNs)) {
+            if (!exposureMatches(frameExposureNs, requestedExposureNs)) {
                 staleFrames += 1
-                val actual = actualExposureNs(image.timestamp)
+                val actual = frameExposureNs
                 mismatchRun = if (actual > requestedExposureNs &&
                     abs(actual - lastActualNs) <= actual / 100) mismatchRun + 1 else 0
                 lastActualNs = actual
@@ -476,10 +602,10 @@ class NoStrobeCamera(
                     requestedExposureNs = 0L
                     return
                 }
-                recordFrame(image.timestamp, actualExposureNs(image.timestamp), last, -1.0, true)
+                recordFrame(image.timestamp, frameExposureNs, last, -1.0, true)
                 if (staleFrames == 60) {
                     Log.w(TAG, "sensor ignores the requested exposure (asked $requestedExposureNs ns, " +
-                        "got ${actualExposureNs(image.timestamp)} ns): manual exposure unsupported in this mode, " +
+                        "got ${frameExposureNs} ns): manual exposure unsupported in this mode, " +
                         "back to auto-exposure for good")
                     autoOnly = true
                     fallBackToAuto(SystemClock.elapsedRealtime(), last ?: unsupportedStatus())
@@ -489,13 +615,17 @@ class NoStrobeCamera(
                 return
             }
             staleFrames = 0
+            if (simFlickerHz > 0.0 && (matchHit % 40) == 0) {
+                Log.d(TAG, "exposure asked %d ns, applied %d ns (%.2f %%)".format(requestedExposureNs, frameExposureNs,
+                    100.0 * (frameExposureNs - requestedExposureNs) / maxOf(1L, requestedExposureNs)))
+            }
             var lumaMean = 0.0
             val cmd = if (pwmMode) {
                 var prof = LineProfileExtractor.rowProfile(image, 1)
                 if (simFlickerHz > 0.0) {
                     // Simulated flicker: what a PWM light would show at the exposure the sensor
                     // really used for this frame, with a phase that follows the frame time.
-                    val expUs = actualExposureNs(image.timestamp) / 1000.0
+                    val expUs = frameExposureNs / 1000.0
                     val phase = (image.timestamp * 1e-9 * simFlickerHz) % 1.0
                     prof = NsJni.syntheticProfile(expUs, simFlickerHz, phase, 0.3, SIM_LINE_RATE_HZ, prof.size)
                 }
@@ -512,6 +642,11 @@ class NoStrobeCamera(
             } else {
                 cmd
             }
+            if (applied.state == NsJni.STATE_LOCKED && applied.periodUs > 0.0) {
+                lockExposureUs = applied.exposureUs
+                lockHz = 1e6 / applied.periodUs
+                lockAtMs = SystemClock.elapsedRealtime()
+            }
             onStatus(applied)
             val now = SystemClock.elapsedRealtime()
             if (applied.state == NsJni.STATE_LOCKED || probeSinceMs == 0L) {
@@ -520,7 +655,7 @@ class NoStrobeCamera(
                 fallBackToAuto(now, applied)
                 return
             }
-            recordFrame(image.timestamp, actualExposureNs(image.timestamp), applied, lumaMean, false)
+            recordFrame(image.timestamp, frameExposureNs, applied, lumaMean, false)
             if (needsUpdate(last, applied)) {
                 last = applied
                 val b = builder!!
@@ -557,6 +692,7 @@ class NoStrobeCamera(
                 for (t in surfaceList) b.addTarget(t)
                 applyZoom(b)
                 applyBias(b)
+                applyQuality(b)
                 builder = b
                 sess.setRepeatingRequest(b.build(), resultCallback, handler)
             } catch (e: Exception) {
@@ -609,5 +745,12 @@ class NoStrobeCamera(
         const val REST_MS = 12_000L
         const val FOCUS_HOLD_MS = 3_000L
         const val SIM_LINE_RATE_HZ = 40_000.0
+        /** Exposure wanted as a fraction of the frame time once locked: 0.5 = 180 degree shutter. */
+        const val SHUTTER_FRACTION = 0.5
+        const val LOCK_GRACE_MS = 4_000L
+        /** ISO above which a longer exposure is preferred (noise matters more than blur). */
+        const val ISO_SOFT_MAX = 3_200.0
+        /** Auto-exposure runs this long before an open-loop recording takes over. */
+        const val SEED_METER_MS = 1_500L
     }
 }

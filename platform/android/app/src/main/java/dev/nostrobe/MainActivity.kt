@@ -55,6 +55,11 @@ class MainActivity : AppCompatActivity() {
     // The last clip recorded (in the cache) and the row rate it was shot with.
     private var lastClip: File? = null
     private var lastRowRate = 0.0
+    private var recFps = 30
+    // The flicker lock in force when the recording starts: the camera is reopened with the
+    // recorder surface and must start on it, not search (probing exposures ruin a clip).
+    private var carryExposureUs = 0.0
+    private var carryHz = 0.0
     private lateinit var zoomBar: SeekBar
     private lateinit var zoomText: TextView
     private lateinit var exposureBar: SeekBar
@@ -199,9 +204,22 @@ class MainActivity : AppCompatActivity() {
         // rejects with "Surface was abandoned".
         camera = NoStrobeCamera(
             manager, option.logicalId, holder.surface, recorder, pwmMode = true,
-            physicalId = option.physicalId, zoomRatio = zoomRatio, evBias = evBias,
+            // While recording, do not pin a physical lens: on a Pixel 11 Pro Fold the recorder
+            // surface of a pinned-lens stream received garbage frames (pure noise). The lock
+            // (an exposure that is a multiple of the period) does not depend on the sensor, so
+            // the logical camera is fine; the lens chip becomes a zoom ratio instead.
+            physicalId = if (recorder != null) null else option.physicalId,
+            zoomRatio = if (recorder != null && option.physicalId != null) logicalZoomFor(option) else zoomRatio,
+            evBias = evBias,
             simFlickerHz = intent.getDoubleExtra("sim_hz", 0.0),
+            seedExposureUs = if (recorder != null) carryExposureUs else 0.0,
+            seedHz = if (recorder != null) carryHz else 0.0,
+            holdAutoNoSeed = recorder != null,
             forceAutoOnly = intent.getBooleanExtra("force_auto_only", false),
+            // Recording: no analysis stream (preview + recorder only). With the third stream a
+            // Pixel 11 Pro Fold wrote pure noise into the clip; the lock is applied open loop.
+            startLevel = if (recorder != null) 2 else intent.getIntExtra("session_level", 0),
+            recordFps = recFps,
             onReady = {
                 // Session configured with the recorder surface: start recording now.
                 val r = recorder
@@ -244,6 +262,20 @@ class MainActivity : AppCompatActivity() {
         evBias = evBias.coerceIn(range.lower * step, range.upper * step)
         exposureBar.progress = Math.round(evBias / step) - evMinIndex
         exposureText.text = "%+.1f EV".format(evBias)
+    }
+
+    /** Zoom ratio on the logical camera that frames like [option]'s lens times the user zoom. */
+    private fun logicalZoomFor(option: LensOption): Float {
+        val main = lensOptions.getOrNull(LensOptions.defaultIndex(lensOptions))?.equivMm ?: 0.0
+        val ratio = if (main > 0.0 && option.equivMm > 0.0) (option.equivMm / main).toFloat() else 1f
+        var lo = 0.5f
+        var hi = 8f
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            val manager = getSystemService(CAMERA_SERVICE) as CameraManager
+            manager.getCameraCharacteristics(option.logicalId)
+                .get(CameraCharacteristics.CONTROL_ZOOM_RATIO_RANGE)?.let { lo = it.lower; hi = it.upper }
+        }
+        return (ratio * zoomRatio).coerceIn(lo, hi)
     }
 
     /** Zoom range of the chosen camera; a pinned lens starts at its own 1x. */
@@ -407,12 +439,13 @@ class MainActivity : AppCompatActivity() {
         // still overshoots on very noisy footage: measured ~143 Mbit/s in a dark scene.
         // A device with no camcorder profile at all gets plain 720p30.
         val rate = p?.videoBitRate ?: 8_000_000
-        val fps = p?.videoFrameRate ?: 30
+        val fps = intent.getIntExtra("rec_fps", 0).takeIf { it > 0 } ?: (p?.videoFrameRate ?: 30)
         val vw = p?.videoFrameWidth ?: 1280
         val vh = p?.videoFrameHeight ?: 720
         r.setVideoEncodingBitRate(minOf(rate, MAX_VIDEO_BITRATE))
         android.util.Log.i("nostrobe", "recorder: profile %d bps -> asked %d bps, %dx%d @ %d".format(rate, minOf(rate, MAX_VIDEO_BITRATE), vw, vh, fps))
         r.setVideoFrameRate(fps)
+        recFps = fps
         r.setVideoSize(vw, vh)
         r.setVideoEncoder(MediaRecorder.VideoEncoder.H264)
         if (withAudio) {
@@ -424,6 +457,9 @@ class MainActivity : AppCompatActivity() {
         r.setOutputFile(File(externalCacheDir ?: cacheDir, "clip.mp4").path)
         r.prepare()
         recorder = r
+        val (ce, ch) = camera?.carryLock() ?: (0.0 to 0.0)
+        carryExposureUs = ce
+        carryHz = ch
         recordButton.isSelected = true
         val w = java.io.FileWriter(File(externalCacheDir ?: cacheDir, "clip.csv"))
         w.write("timestamp_ns,exposure_ns,iso,luma,state,freq_hz,stale\n")

@@ -171,3 +171,28 @@ pub extern "system" fn Java_dev_nostrobe_NsJni_nativeSyntheticProfile<'a>(
     let _ = env.set_double_array_region(&arr, 0, &p);
     arr
 }
+
+/// Start a PWM controller already locked at `exposure_us` / `f_hz` (see `PwmController::seed_lock`).
+#[no_mangle]
+pub extern "system" fn Java_dev_nostrobe_NsJni_nativeSeedPwm(
+    _env: JNIEnv,
+    _class: JClass,
+    handle: jlong,
+    exposure_us: jdouble,
+    f_hz: jdouble,
+) {
+    let ctrl = unsafe { &mut *(handle as *mut PwmController) };
+    ctrl.seed_lock(exposure_us, f_hz);
+}
+
+/// Wanted exposure as a fraction of the frame time once locked (see `PwmController::set_shutter_fraction`).
+#[no_mangle]
+pub extern "system" fn Java_dev_nostrobe_NsJni_nativeSetShutterFraction(
+    _env: JNIEnv,
+    _class: JClass,
+    handle: jlong,
+    fraction: jdouble,
+) {
+    let ctrl = unsafe { &mut *(handle as *mut PwmController) };
+    ctrl.set_shutter_fraction(fraction);
+}

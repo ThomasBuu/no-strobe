@@ -76,6 +76,10 @@ pub struct PwmController {
     /// Local re-check of an existing lock (blind mode): the state stays Locked while probing
     /// +-2 % around the locked exposure.
     rechecking: bool,
+    /// Wanted exposure as a fraction of the frame time (0.5 = 180 degree shutter); 0 = the
+    /// shortest k/f. Every multiple of the period cancels the flicker, and a longer one lets
+    /// the ISO come down by the same factor.
+    shutter_fraction: f64,
     /// Banding metric summed over the frames of the current trial (averaged at its end).
     trial_acc: f64,
     trial_n: usize,
@@ -111,6 +115,7 @@ impl PwmController {
             luma_last: 0.0,
             flicker_seen: false,
             rechecking: false,
+            shutter_fraction: 0.0,
             trial_acc: 0.0,
             trial_n: 0,
             verify_stage: 0,
@@ -132,6 +137,53 @@ impl PwmController {
 
     pub fn frequency_hz(&self) -> f64 {
         self.f_hz
+    }
+
+    /// Ask for exposures near `fraction` of the frame time (on a multiple of the flicker period)
+    /// once locked. 0 disables it.
+    pub fn set_shutter_fraction(&mut self, fraction: f64) {
+        self.shutter_fraction = fraction.clamp(0.0, 1.0);
+    }
+
+    /// After a lock on some `k / f`: move to the multiple of the period closest below the wanted
+    /// exposure and re-centre there (state stays Locked). Returns true if it moved.
+    fn scale_up(&mut self) -> bool {
+        if self.shutter_fraction <= 0.0 || self.f_hz <= 0.0 {
+            return false;
+        }
+        let frame_us = 1e6 / self.fps;
+        let target = (self.shutter_fraction * frame_us).min(self.exposure_cap());
+        let k = (target * self.f_hz / 1e6).floor().max(1.0);
+        let e = k * 1e6 / self.f_hz;
+        if e <= self.best_exposure * 1.5 {
+            return false;
+        }
+        self.best_exposure = e;
+        self.hill_base = e;
+        self.hill_exposure = e;
+        self.hill_step = 1.04;
+        self.probe = 0;
+        self.probe_res = [0.0; 3];
+        self.trial_acc = 0.0;
+        self.trial_n = 0;
+        self.frames_since_check = 0;
+        self.rechecking = true;
+        self.phase = Phase::Hill;
+        true
+    }
+
+    /// Start already locked on a flicker found earlier (the camera is reopened to record and
+    /// must not search again: probing exposures ruin a clip). The usual local re-checks follow.
+    pub fn seed_lock(&mut self, exposure_us: f64, f_hz: f64) {
+        self.f_hz = f_hz;
+        self.confidence = 0.8;
+        self.best_exposure = exposure_us;
+        // The banding left at a good lock is unknown here: stay tolerant before calling it degraded.
+        self.best_residual = 0.02;
+        self.flicker_seen = true;
+        self.rechecking = false;
+        self.frames_since_check = 0;
+        self.phase = Phase::Locked;
     }
 
     /// Feed one frame's vertical luminance profile, get the exposure to apply.
@@ -285,11 +337,15 @@ impl PwmController {
             return self.begin_verify();
         }
         if self.hill_step < HILL_FINE {
+            let was_rechecking = self.rechecking;
             self.best_exposure = self.hill_base;
             self.best_residual = pwm::banding_amplitude(profile);
             self.rechecking = false;
             self.phase = Phase::Locked;
             self.frames_since_check = 0;
+            if !was_rechecking && self.line_rate_hz > 0.0 && self.scale_up() {
+                return self.emit(self.hill_exposure, State::Locked, self.confidence);
+            }
             return self.emit(self.best_exposure, State::Locked, self.confidence);
         }
         self.emit(self.hill_exposure, progress, self.confidence)
@@ -381,6 +437,9 @@ impl PwmController {
             self.rechecking = false;
             self.phase = Phase::Locked;
             self.frames_since_check = 0;
+            if self.scale_up() {
+                return self.emit(self.hill_exposure, State::Locked, self.confidence);
+            }
             return self.emit(self.best_exposure, State::Locked, self.confidence);
         }
         // Not a null: forget this frequency and keep climbing from the lower far probe.
