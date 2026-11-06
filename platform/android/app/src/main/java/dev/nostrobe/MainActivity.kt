@@ -43,14 +43,16 @@ class MainActivity : AppCompatActivity() {
     private lateinit var status: TextView
     private lateinit var recordButton: android.view.View
     private lateinit var lensRow: android.widget.LinearLayout
-    private lateinit var flipButton: Button
-    private lateinit var postButton: Button
-    private lateinit var micButton: Button
-    private lateinit var gridButton: Button
-    private lateinit var timerButton: Button
+    private lateinit var flipButton: TextView
+    private lateinit var postButton: TextView
+    private lateinit var micButton: TextView
+    private lateinit var gridButton: TextView
+    private lateinit var timerButton: TextView
     private lateinit var gridView: android.view.View
     private lateinit var countdownText: TextView
     private var micOn = true
+    private var layoutPortrait = true
+    private var relayoutAfterRecording = false
     private var timerSecs = 0
     // The last clip recorded (in the cache) and the row rate it was shot with.
     private var lastClip: File? = null
@@ -81,13 +83,26 @@ class MainActivity : AppCompatActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        layoutPortrait = resources.configuration.orientation != android.content.res.Configuration.ORIENTATION_LANDSCAPE
         setContentView(R.layout.main)
         surfaceView = findViewById(R.id.preview)
         focusRing = findViewById(R.id.focusRing)
+        val pinch = android.view.ScaleGestureDetector(this,
+            object : android.view.ScaleGestureDetector.SimpleOnScaleGestureListener() {
+                override fun onScale(d: android.view.ScaleGestureDetector): Boolean {
+                    stepZoom(d.scaleFactor); return true
+                }
+            })
+        var pinched = false
         surfaceView.setOnTouchListener { v, e ->
+            pinch.onTouchEvent(e)
+            if (pinch.isInProgress || e.pointerCount > 1) pinched = true
             if (e.action == android.view.MotionEvent.ACTION_UP) {
-                camera?.focusAt(e.x / v.width, e.y / v.height)
-                showFocusRing(e.x, e.y)
+                if (!pinched) {
+                    camera?.focusAt(e.x / v.width, e.y / v.height)
+                    showFocusRing(e.x, e.y)
+                }
+                pinched = false
                 v.performClick()
             }
             true
@@ -149,8 +164,12 @@ class MainActivity : AppCompatActivity() {
             exposureText.text = "%+.1f EV".format(0f)
             camera?.setExposureBias(0f)
         }
-        findViewById<Button>(R.id.zoomOut).setOnClickListener { stepZoom(1f / 1.25f) }
-        findViewById<Button>(R.id.zoomIn).setOnClickListener { stepZoom(1.25f) }
+        findViewById<TextView>(R.id.evToggle).setOnClickListener { v ->
+            val panel = findViewById<android.view.View>(R.id.evPanel)
+            val show = panel.visibility != android.view.View.VISIBLE
+            panel.visibility = if (show) android.view.View.VISIBLE else android.view.View.GONE
+            v.isSelected = show
+        }
         zoomBar.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
             override fun onProgressChanged(bar: SeekBar, progress: Int, fromUser: Boolean) {
                 if (!fromUser || zoomMax <= zoomMin) return
@@ -178,6 +197,15 @@ class MainActivity : AppCompatActivity() {
         ) {
             ActivityCompat.requestPermissions(this, arrayOf(Manifest.permission.CAMERA), 1)
         }
+    }
+
+    /** The manifest keeps the activity alive on fold/rotation, so the layout has to be inflated again by hand. */
+    override fun onConfigurationChanged(newConfig: android.content.res.Configuration) {
+        super.onConfigurationChanged(newConfig)
+        val portrait = newConfig.orientation != android.content.res.Configuration.ORIENTATION_LANDSCAPE
+        if (portrait == layoutPortrait) return
+        if (recorder != null) { relayoutAfterRecording = true; return }
+        recreate()
     }
 
     override fun onPause() {
@@ -240,7 +268,8 @@ class MainActivity : AppCompatActivity() {
             // Live correction is not available: tell the user when the clip will need it.
             if (recorder != null && cmd.state != NsJni.STATE_LOCKED) s += "  [post needed]"
             android.util.Log.d("nostrobe", s)
-            runOnUiThread { status.text = s }
+            val shortText = shortStatus(cmd) + (if (recorder != null && cmd.state != NsJni.STATE_LOCKED) " · post" else "")
+            runOnUiThread { status.text = shortText }
         }
         camera?.meta = pendingMeta
         if (intent.getBooleanExtra("luma_csv", false) && pendingMeta == null) {
@@ -428,17 +457,21 @@ class MainActivity : AppCompatActivity() {
                 }
                 else -> o.label
             }
-            val b = Button(this).apply {
+            val dp = resources.displayMetrics.density
+            val b = TextView(this).apply {
                 this.text = text
-                minWidth = 0
-                minimumWidth = 0
-                isAllCaps = false
-                alpha = if (i == lensIndex) 1f else 0.55f
+                gravity = android.view.Gravity.CENTER
+                textSize = 13f
+                setTextColor(androidx.core.content.res.ResourcesCompat.getColorStateList(resources, R.color.chip_text, theme))
+                setBackgroundResource(R.drawable.bg_lens_chip)
+                setPadding((12 * dp).toInt(), (6 * dp).toInt(), (12 * dp).toInt(), (6 * dp).toInt())
+                isSelected = i == lensIndex
                 setOnClickListener { selectLens(i) }
             }
-            lensRow.addView(b)
+            lensRow.addView(b, android.widget.LinearLayout.LayoutParams(
+                android.widget.LinearLayout.LayoutParams.WRAP_CONTENT,
+                android.widget.LinearLayout.LayoutParams.WRAP_CONTENT).apply { marginEnd = (6 * dp).toInt() })
         }
-        flipButton.text = if (lensOptions[lensIndex].label.startsWith("front")) "back" else "front"
     }
 
     private fun stepZoom(factor: Float) {
@@ -463,6 +496,7 @@ class MainActivity : AppCompatActivity() {
             requestedOrientation = android.content.pm.ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
             finishClip()
             notifyPost(total, locked)
+            if (relayoutAfterRecording) { relayoutAfterRecording = false; recreate(); return }
             camera?.stop(); startCamera()
             return
         }
@@ -520,7 +554,8 @@ class MainActivity : AppCompatActivity() {
         r.setOutputFile(File(externalCacheDir ?: cacheDir, "clip.mp4").path)
         r.prepare()
         recorder = r
-        // A rotation would recreate the activity and cut the recording.
+        // The activity survives rotation (configChanges in the manifest), so the recording is
+        // not cut; the clip's orientation hint is read from the screen at this point.
         requestedOrientation = android.content.pm.ActivityInfo.SCREEN_ORIENTATION_LOCKED
         carryExposureUs = carriedLock.first
         carryHz = carriedLock.second
@@ -579,9 +614,13 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun refreshToggles() {
-        micButton.text = if (micOn) "mic on" else "mic off"
-        gridButton.text = if (gridView.visibility == android.view.View.VISIBLE) "grid on" else "grid off"
-        timerButton.text = if (timerSecs == 0) "timer off" else "timer ${timerSecs}s"
+        micButton.text = if (micOn) "mic" else "muted"
+        micButton.isSelected = micOn
+        val gridOn = gridView.visibility == android.view.View.VISIBLE
+        gridButton.text = "grid"
+        gridButton.isSelected = gridOn
+        timerButton.text = if (timerSecs == 0) "timer" else "${timerSecs}s"
+        timerButton.isSelected = timerSecs > 0
     }
 
     /** Counts down on the preview, then runs [then] (starting the recording). */
@@ -733,6 +772,21 @@ class MainActivity : AppCompatActivity() {
                 "post-processing is needed (tools/postprocess.sh)."
         }
         Toast.makeText(this, msg, Toast.LENGTH_LONG).show()
+    }
+
+    /** The on-screen line: state, flicker frequency, exposure and ISO. */
+    private fun shortStatus(cmd: NsCommand): String {
+        val locked = cmd.state == NsJni.STATE_LOCKED
+        val hz = if (cmd.periodUs > 0) 1e6 / cmd.periodUs else 0.0
+        val head = when {
+            cmd.mode == NsJni.MODE_AUTO || cmd.mode == NsJni.MODE_UNSUPPORTED -> "AUTO"
+            locked && hz > 0 -> "LOCK %.0f Hz".format(hz)
+            locked -> "LOCK"
+            else -> "SEARCH"
+        }
+        if (cmd.exposureUs <= 0) return head
+        val exp = if (cmd.exposureUs >= 1000) "%.1f ms".format(cmd.exposureUs / 1000) else "%.0f us".format(cmd.exposureUs)
+        return "$head · $exp · ISO %.0f".format(cmd.iso)
     }
 
     private fun describe(cmd: NsCommand): String {
