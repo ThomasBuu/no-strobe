@@ -1,0 +1,218 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Wide screens (a foldable opened flat, a tablet): the viewfinder in 16:9 on one side, every
+     setting on the other. Same view ids as layout/main.xml. -->
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:orientation="horizontal">
+
+    <FrameLayout
+        android:layout_width="0dp"
+        android:layout_height="match_parent"
+        android:layout_weight="3"
+        android:background="#FF000000">
+
+        <dev.nostrobe.AspectFrameLayout
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:layout_gravity="center">
+
+            <SurfaceView
+                android:id="@+id/preview"
+                android:layout_width="match_parent"
+                android:layout_height="match_parent" />
+
+            <dev.nostrobe.GridOverlay
+                android:id="@+id/grid"
+                android:layout_width="match_parent"
+                android:layout_height="match_parent"
+                android:visibility="gone" />
+
+            <TextView
+                android:id="@+id/countdown"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_gravity="center"
+                android:textColor="#FFFFFFFF"
+                android:textSize="96sp"
+                android:visibility="gone" />
+
+            <ImageView
+                android:id="@+id/focusRing"
+                android:layout_width="76dp"
+                android:layout_height="76dp"
+                android:src="@drawable/focus_ring"
+                android:contentDescription="focus"
+                android:visibility="gone" />
+        </dev.nostrobe.AspectFrameLayout>
+    </FrameLayout>
+
+    <ScrollView
+        android:layout_width="0dp"
+        android:layout_height="match_parent"
+        android:layout_weight="2"
+        android:fillViewport="true">
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical">
+
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal"
+                android:gravity="center_vertical"
+                android:paddingStart="8dp"
+                android:paddingEnd="8dp">
+
+                <LinearLayout
+                    android:id="@+id/lensRow"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:orientation="horizontal" />
+
+                <Button
+                    android:id="@+id/post"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="post"
+                    android:visibility="gone" />
+
+                <Button
+                    android:id="@+id/flip"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="flip" />
+            </LinearLayout>
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal"
+                android:gravity="center_vertical"
+                android:paddingStart="8dp"
+                android:paddingEnd="8dp">
+
+                <Button
+                    android:id="@+id/zoomOut"
+                    android:layout_width="48dp"
+                    android:layout_height="wrap_content"
+                    android:minWidth="0dp"
+                    android:text="-" />
+
+                <SeekBar
+                    android:id="@+id/zoom"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:max="100" />
+
+                <Button
+                    android:id="@+id/zoomIn"
+                    android:layout_width="48dp"
+                    android:layout_height="wrap_content"
+                    android:minWidth="0dp"
+                    android:text="+" />
+
+                <TextView
+                    android:id="@+id/zoomText"
+                    android:layout_width="56dp"
+                    android:layout_height="wrap_content"
+                    android:gravity="end"
+                    android:fontFamily="monospace"
+                    android:text="1.0x" />
+            </LinearLayout>
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal"
+                android:gravity="center_vertical"
+                android:paddingStart="8dp"
+                android:paddingEnd="8dp">
+
+                <TextView
+                    android:layout_width="48dp"
+                    android:layout_height="wrap_content"
+                    android:gravity="center"
+                    android:text="EV" />
+
+                <SeekBar
+                    android:id="@+id/exposureBar"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:max="0" />
+
+                <TextView
+                    android:id="@+id/exposureText"
+                    android:layout_width="96dp"
+                    android:layout_height="wrap_content"
+                    android:gravity="end"
+                    android:fontFamily="monospace"
+                    android:text="+0.0 EV" />
+            </LinearLayout>
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal"
+                android:paddingStart="8dp"
+                android:paddingEnd="8dp">
+
+                <Button
+                    android:id="@+id/mic"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:textAllCaps="false"
+                    android:text="mic on" />
+
+                <Button
+                    android:id="@+id/gridToggle"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:textAllCaps="false"
+                    android:text="grid off" />
+
+                <Button
+                    android:id="@+id/timer"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:textAllCaps="false"
+                    android:text="timer off" />
+            </LinearLayout>
+
+            <TextView
+                android:id="@+id/status"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:padding="8dp"
+                android:fontFamily="monospace"
+                android:textSize="14sp"
+                android:text="search" />
+
+            <FrameLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:paddingTop="6dp"
+                android:paddingBottom="14dp">
+
+                <View
+                    android:id="@+id/record"
+                    android:layout_width="76dp"
+                    android:layout_height="76dp"
+                    android:layout_gravity="center_horizontal"
+                    android:background="@drawable/capture_button"
+                    android:contentDescription="record"
+                    android:clickable="true"
+                    android:focusable="true" />
+            </FrameLayout>
+        </LinearLayout>
+    </ScrollView>
+</LinearLayout>

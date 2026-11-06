@@ -52,6 +52,9 @@ class NoStrobeCamera(
     private val forceAutoOnly: Boolean = false,
     /** Debug: start the session ladder at this level (2 = no analysis stream). */
     private val startLevel: Int = 0,
+    /** Debug: sweep fixed exposures and write the row profiles of each to profiles.csv (real data). */
+    private val dumpProfiles: Boolean = false,
+    private val outDir: java.io.File? = null,
     /** Frame rate the recorder was set to (the open-loop recording uses it). */
     private val recordFps: Int = 30,
     /** A lock found before this camera was reopened (to record): start on it, do not search. */
@@ -557,6 +560,49 @@ class NoStrobeCamera(
         return (ambient + 0.8 * (caught / pulse)).coerceIn(0.0, 1.0)
     }
 
+    // --- debug: row profiles at fixed exposures, to study a real light offline ---------------
+    private val dumpExposuresUs = doubleArrayOf(500.0, 1000.0, 2000.0, 4000.0, 6000.0, 8000.0, 10000.0,
+        12000.0, 15000.0, 20000.0, 25000.0, 30000.0)
+    private var dumpIndex = 0
+    private var dumpFrames = 0
+    private var dumpWriter: java.io.Writer? = null
+
+    /** Returns true while the sweep owns the frame. */
+    private fun handleDump(image: android.media.Image, exposureNs: Long): Boolean {
+        if (dumpIndex >= dumpExposuresUs.size) return false
+        val b = builder ?: return true
+        val e = dumpExposuresUs[dumpIndex]
+        if (requestedExposureNs != (e * 1000).toLong()) {
+            val budget = if (budgetUsIso > 0.0) budgetUsIso else latestAutoBudget
+            val iso = if (budget > 0.0) (budget / e).coerceIn(isoMin, isoMax) else isoMax
+            Camera2Sync.apply(b, NsCommand(e, 30.0, iso, NsJni.MODE_PWM, NsJni.STATE_SEARCH, 0.0, 0.0, 0.0))
+            requestedExposureNs = (e * 1000).toLong()
+            dumpFrames = 0
+            try { session?.setRepeatingRequest(b.build(), resultCallback, handler) } catch (_: Exception) {}
+            Log.i(TAG, "dump: exposure %.0f us ISO %.0f".format(e, iso))
+            return true
+        }
+        if (!exposureMatches(exposureNs, requestedExposureNs)) return true
+        if (dumpWriter == null) {
+            dumpWriter = java.io.FileWriter(java.io.File(outDir ?: return true, "profiles.csv"))
+        }
+        val prof = LineProfileExtractor.rowProfile(image, 1)
+        val w = dumpWriter!!
+        w.write("%.0f,%d".format(e, image.timestamp))
+        for (v in prof) w.write(",%.5f".format(java.util.Locale.US, v))
+        w.write("\n")
+        dumpFrames += 1
+        if (dumpFrames >= 24) {
+            dumpIndex += 1
+            dumpFrames = 0
+            if (dumpIndex >= dumpExposuresUs.size) {
+                w.flush(); w.close(); dumpWriter = null
+                Log.i(TAG, "dump: done")
+            }
+        }
+        return true
+    }
+
     private fun unsupportedStatus() = NsCommand(0.0, 0.0, 0.0, NsJni.MODE_UNSUPPORTED,
         NsJni.STATE_SEARCH, 0.0, 0.0, 0.0)
 
@@ -617,6 +663,7 @@ class NoStrobeCamera(
                     if (matchHit == 0 && missRun > 60) latestResultExposureNs else return
                 }
             }
+            if (dumpProfiles && handleDump(image, frameExposureNs)) return
             // Skip frames still carrying the previous exposure; they would pollute the trial.
             if (!exposureMatches(frameExposureNs, requestedExposureNs)) {
                 staleFrames += 1

@@ -218,6 +218,8 @@ class MainActivity : AppCompatActivity() {
             forceAutoOnly = intent.getBooleanExtra("force_auto_only", false),
             // Recording: no analysis stream (preview + recorder only). With the third stream a
             // Pixel 11 Pro Fold wrote pure noise into the clip; the lock is applied open loop.
+            dumpProfiles = intent.getBooleanExtra("dump_profiles", false),
+            outDir = externalCacheDir ?: cacheDir,
             startLevel = if (recorder != null) 2 else intent.getIntExtra("session_level", 0),
             recordFps = recFps,
             onReady = {
@@ -342,11 +344,24 @@ class MainActivity : AppCompatActivity() {
         return null
     }
 
-    /** Rotation to store in the clip so it plays upright (the screen is locked to portrait). */
+    /**
+     * Rotation to store in the clip so it plays upright: the sensor's mounting angle corrected
+     * by how the screen is turned (a foldable held sideways records landscape).
+     */
     private fun sensorOrientation(): Int {
         val manager = getSystemService(CAMERA_SERVICE) as CameraManager
-        val id = lensOptions.getOrNull(lensIndex)?.logicalId ?: return 90
-        return manager.getCameraCharacteristics(id).get(CameraCharacteristics.SENSOR_ORIENTATION) ?: 90
+        val option = lensOptions.getOrNull(lensIndex) ?: return 90
+        val chars = manager.getCameraCharacteristics(option.logicalId)
+        val sensor = chars.get(CameraCharacteristics.SENSOR_ORIENTATION) ?: 90
+        @Suppress("DEPRECATION")
+        val screen = when (windowManager.defaultDisplay.rotation) {
+            android.view.Surface.ROTATION_90 -> 90
+            android.view.Surface.ROTATION_180 -> 180
+            android.view.Surface.ROTATION_270 -> 270
+            else -> 0
+        }
+        val front = chars.get(CameraCharacteristics.LENS_FACING) == CameraCharacteristics.LENS_FACING_FRONT
+        return if (front) (sensor + screen) % 360 else (sensor - screen + 360) % 360
     }
 
     private fun selectLens(index: Int) {
@@ -415,6 +430,7 @@ class MainActivity : AppCompatActivity() {
             }
             recorder?.release(); recorder = null
             recordButton.isSelected = false
+            requestedOrientation = android.content.pm.ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
             finishClip()
             notifyPost(total, locked)
             camera?.stop(); startCamera()
@@ -462,6 +478,8 @@ class MainActivity : AppCompatActivity() {
         r.setOutputFile(File(externalCacheDir ?: cacheDir, "clip.mp4").path)
         r.prepare()
         recorder = r
+        // A rotation would recreate the activity and cut the recording.
+        requestedOrientation = android.content.pm.ActivityInfo.SCREEN_ORIENTATION_LOCKED
         carryExposureUs = carriedLock.first
         carryHz = carriedLock.second
         recordButton.isSelected = true
