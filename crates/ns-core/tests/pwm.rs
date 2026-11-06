@@ -246,6 +246,36 @@ fn blind_lock_holds_over_time_and_follows_a_frequency_change() {
 }
 
 #[test]
+fn locked_exposure_never_moves_in_blind_mode() {
+    // A recording cannot afford exposure steps: every probe of a re-check changes the exposure the
+    // sensor uses, so the clip shows a brightness step. Once the null is found, the exposure stays.
+    let mut c = PwmController::new(phone_limits(), 0.0);
+    let f_hz = 500.0;
+    let mut phase = 0.0;
+    let mut last = c.on_profile(&profile_for(1000.0, f_hz, phase, 0.3, LINE_RATE, ROWS));
+    let mut locked_at = None;
+    for i in 0..600 {
+        phase += 0.0137;
+        last = c.on_profile(&profile_for(last.exposure_us, f_hz, phase, 0.3, LINE_RATE, ROWS));
+        if last.state == State::Locked {
+            locked_at = Some(i);
+            break;
+        }
+    }
+    let start = locked_at.expect("never locked");
+    let fixed = last.exposure_us;
+    let t_us = 1e6 / f_hz;
+    let k = (fixed / t_us).round();
+    assert!((fixed - k * t_us).abs() < 0.01 * t_us, "locked off the null: {fixed} us");
+    for i in 0..300 {
+        phase += 0.0137;
+        last = c.on_profile(&profile_for(last.exposure_us, f_hz, phase, 0.3, LINE_RATE, ROWS));
+        assert_eq!(last.state, State::Locked, "left the lock at frame {i} after locking at {start}");
+        assert_eq!(last.exposure_us, fixed, "exposure moved to {} us at frame {i}", last.exposure_us);
+    }
+}
+
+#[test]
 fn noisy_blind_sweep_never_locks_on_a_false_minimum() {
     // A real sensor adds noise to every row: a "minimum" found in noise must not count.
     for (f_hz, seed0) in [(500.0, 1u64), (500.0, 7), (800.0, 3), (1200.0, 11), (300.0, 5)] {

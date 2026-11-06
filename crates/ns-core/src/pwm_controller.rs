@@ -59,6 +59,8 @@ pub struct PwmController {
     confidence: f64,
     best_exposure: f64,
     best_residual: f64,
+    /// Banding amplitude of the most recent frame, for the offline traces.
+    residual_last: f64,
     frames_since_check: usize,
     last_exposure: f64,
     /// Hill climb on the banding metric: centre exposure, multiplicative step,
@@ -104,6 +106,7 @@ impl PwmController {
             confidence: 0.0,
             best_exposure: 0.0,
             best_residual: 0.0,
+            residual_last: 0.0,
             frames_since_check: 0,
             last_exposure: 0.0,
             hill_exposure: 0.0,
@@ -137,6 +140,16 @@ impl PwmController {
 
     pub fn frequency_hz(&self) -> f64 {
         self.f_hz
+    }
+
+    /// The hill climb's internal state, for the offline traces: (base, step, probe results).
+    pub fn debug_hill(&self) -> (f64, f64, [f64; 3]) {
+        (self.hill_base, self.hill_step, self.probe_res)
+    }
+
+    /// (best residual recorded at the lock, residual of the last frame).
+    pub fn debug_residual(&self) -> (f64, f64) {
+        (self.best_residual, self.residual_last)
     }
 
     /// Ask for exposures near `fraction` of the frame time (on a multiple of the flicker period)
@@ -353,21 +366,26 @@ impl PwmController {
 
     fn locked(&mut self, profile: &[f64]) -> crate::controller::Command {
         let residual = pwm::banding_amplitude(profile);
+        self.residual_last = residual;
         self.frames_since_check += 1;
         let stale = self.frames_since_check >= CHECK_FRAMES;
         let degraded = residual > self.best_residual * (1.0 + RESIDUAL_TOLERANCE)
             && residual > 0.01;
-        if (stale || degraded) && self.line_rate_hz == 0.0 {
+        // Blind mode: re-centre only when the banding really grew. A periodic re-centre probes
+        // at +-2 % (and +-4 % right after a scale-up), and every probe changes the exposure the
+        // sensor uses, so a recording shows a brightness step each time. Once the base sits on
+        // the null, probing costs the video and buys nothing.
+        if degraded && self.line_rate_hz == 0.0 {
             self.frames_since_check = 0;
-            if degraded {
-                // The flicker changed (or stopped): search again from scratch.
+            // The flicker changed (or stopped): search again from scratch.
+            if residual > 0.05 {
                 self.profiles.clear();
                 self.f_hz = 0.0;
                 self.confidence = 0.0;
                 self.phase = Phase::Search;
                 return self.emit(self.limits.min_exposure_us, State::Search, 0.0);
             }
-            // Same flicker: only re-centre on the null, staying at the locked exposure.
+            // Same flicker, null moved: re-centre, staying at the locked exposure.
             self.hill_base = self.best_exposure;
             self.hill_exposure = self.best_exposure;
             self.hill_step = 1.02;
@@ -377,7 +395,9 @@ impl PwmController {
             self.phase = Phase::Hill;
             return self.emit(self.hill_exposure, State::Locked, self.confidence);
         }
-        if stale || degraded {
+        // The line-rate path re-measures f from short-exposure profiles, so it needs a periodic
+        // recalibration. Blind mode has no profiles to re-measure: staying on the null is the job.
+        if (stale || degraded) && self.line_rate_hz > 0.0 {
             self.frames_since_check = 0;
             self.profiles.clear();
             self.phase = Phase::Recalib;
