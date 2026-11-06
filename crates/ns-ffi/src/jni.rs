@@ -322,3 +322,94 @@ pub extern "system" fn Java_dev_nostrobe_NsJni_nativeSetShutterFraction(
     let ctrl = unsafe { &mut *(handle as *mut PwmController) };
     ctrl.set_shutter_fraction(fraction);
 }
+
+
+/// Native SIMD-accelerated mean luminance of a plane from a direct ByteBuffer.
+#[no_mangle]
+pub extern "system" fn Java_dev_nostrobe_NsJni_nativeMeanLuma(
+    env: JNIEnv,
+    _class: JClass,
+    buffer: JByteBuffer,
+    width: jint,
+    height: jint,
+    row_stride: jint,
+    pixel_stride: jint,
+) -> jdouble {
+    let (buf_ptr, buf_len) = match env.get_direct_buffer_address(&buffer) {
+        Ok(ptr) => {
+            let cap = env.get_direct_buffer_capacity(&buffer).unwrap_or(0);
+            (ptr, cap)
+        }
+        Err(_) => return 0.0,
+    };
+    if buf_ptr.is_null() || buf_len == 0 {
+        return 0.0;
+    }
+    let slice = unsafe { std::slice::from_raw_parts(buf_ptr, buf_len) };
+    let w = width.max(0) as usize;
+    let h = height.max(0) as usize;
+    let rs = row_stride.max(0) as usize;
+    let ps = pixel_stride.max(0) as usize;
+
+    let p = ns_core::profile::extract_row_profile(slice, w, h, rs, ps, 2, 2);
+    if p.is_empty() {
+        0.0
+    } else {
+        p.iter().sum::<f64>() / p.len() as f64
+    }
+}
+
+/// Native accelerated gain application (temporal + row gains) between direct ByteBuffers.
+#[no_mangle]
+pub extern "system" fn Java_dev_nostrobe_NsJni_nativeApplyPlaneGains(
+    mut env: JNIEnv,
+    _class: JClass,
+    src_buf: JByteBuffer,
+    dst_buf: JByteBuffer,
+    width: jint,
+    height: jint,
+    src_row_stride: jint,
+    src_pixel_stride: jint,
+    dst_row_stride: jint,
+    dst_pixel_stride: jint,
+    row_gains: JDoubleArray,
+    temporal_gain: jdouble,
+) {
+    let (s_ptr, s_len) = match env.get_direct_buffer_address(&src_buf) {
+        Ok(ptr) => (ptr, env.get_direct_buffer_capacity(&src_buf).unwrap_or(0)),
+        Err(_) => return,
+    };
+    let (d_ptr, d_len) = match env.get_direct_buffer_address(&dst_buf) {
+        Ok(ptr) => (ptr, env.get_direct_buffer_capacity(&dst_buf).unwrap_or(0)),
+        Err(_) => return,
+    };
+    if s_ptr.is_null() || d_ptr.is_null() || s_len == 0 || d_len == 0 {
+        return;
+    }
+
+    let gains_vec = if !row_gains.is_null() {
+        unsafe {
+            env.get_array_elements(&row_gains, ReleaseMode::NoCopyBack)
+                .map(|arr| arr.iter().copied().collect::<Vec<f64>>())
+                .ok()
+        }
+    } else {
+        None
+    };
+
+    let s_slice = unsafe { std::slice::from_raw_parts(s_ptr, s_len) };
+    let d_slice = unsafe { std::slice::from_raw_parts_mut(d_ptr, d_len) };
+
+    ns_core::restorer::apply_plane_gains(
+        s_slice,
+        d_slice,
+        width.max(0) as usize,
+        height.max(0) as usize,
+        src_row_stride.max(0) as usize,
+        src_pixel_stride.max(0) as usize,
+        dst_row_stride.max(0) as usize,
+        dst_pixel_stride.max(0) as usize,
+        gains_vec.as_deref(),
+        temporal_gain,
+    );
+}

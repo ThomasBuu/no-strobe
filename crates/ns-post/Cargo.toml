@@ -9,4 +9,4 @@ name = "no-strobe-post"
 path = "src/main.rs"
 
 [dependencies]
-ns-core = { path = "../ns-core" }
+ns-core = { path = "../ns-core", features = ["vulkan"] }

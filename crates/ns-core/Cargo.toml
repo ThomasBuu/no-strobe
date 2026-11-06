@@ -6,3 +6,10 @@ edition = "2021"
 [lib]
 name = "ns_core"
 path = "src/lib.rs"
+
+[dependencies]
+ash = { version = "0.38", default-features = false, features = ["loaded", "std"], optional = true }
+
+[features]
+default = []
+vulkan = ["dep:ash"]

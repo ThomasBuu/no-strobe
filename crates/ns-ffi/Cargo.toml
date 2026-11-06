@@ -10,7 +10,9 @@ crate-type = ["cdylib", "staticlib"]
 [dependencies]
 jni = { version = "0.21", optional = true }
 ns-core = { path = "../ns-core" }
+ash = { version = "0.38", default-features = false, features = ["loaded", "std"], optional = true }
 
 [features]
 android = ["jni"]
 jni = ["dep:jni"]
+vulkan = ["dep:ash"]

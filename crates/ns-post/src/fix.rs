@@ -87,13 +87,30 @@ pub fn fix(input: &Path, output: &Path, line_rate_hz: f64, log: &mut dyn FnMut(&
     let frame_len = p.width * p.height;
     log(&format!("{}x{} at {} fps, rotation {}", p.width, p.height, p.fps, p.rotation));
 
+    let mut vk = ns_core::vulkan::VulkanCompute::new().ok();
+    if vk.is_some() {
+        log("Vulkan compute acceleration: ENABLED (GPU)");
+    } else {
+        log("Vulkan compute acceleration: disabled (falling back to CPU)");
+    }
+
     // Pass 1: brightness of every frame.
     let mut dec = decoder(input)?;
     let mut out = dec.stdout.take().ok_or("no decoder pipe")?;
     let mut buf = vec![0u8; frame_len];
     let mut means = Vec::new();
     while read_frame(&mut out, &mut buf)? {
-        means.push(mean(&buf));
+        if let Some(ref mut vk_ctx) = vk {
+            match vk_ctx.compute_row_means(&buf, p.width, p.height, p.width) {
+                Ok(rm) => {
+                    let frame_m = rm.iter().map(|&v| v as f64).sum::<f64>() / p.height as f64;
+                    means.push(frame_m);
+                }
+                Err(_) => means.push(mean(&buf)),
+            }
+        } else {
+            means.push(mean(&buf));
+        }
     }
     let _ = dec.wait();
     if means.is_empty() {
@@ -127,24 +144,69 @@ pub fn fix(input: &Path, output: &Path, line_rate_hz: f64, log: &mut dyn FnMut(&
     let mut out = dec.stdout.take().ok_or("no decoder pipe")?;
     let mut idx = 0usize;
     let mut f_hz = 0.0;
+    let mut out_buf = vec![0u8; frame_len];
+
     while idx < gains.len() && read_frame(&mut out, &mut buf)? {
+        let mut row_gains_f32 = vec![1.0f32; p.height];
         if line_rate_hz > 0.0 {
-            let (g, f) = row_gain(&row_means(&buf, p.width), line_rate_hz, 3.0);
+            let row_m: Vec<f64> = if let Some(ref mut vk_ctx) = vk {
+                match vk_ctx.compute_row_means(&buf, p.width, p.height, p.width) {
+                    Ok(rm) => rm.into_iter().map(|v| v as f64).collect(),
+                    Err(_) => row_means(&buf, p.width),
+                }
+            } else {
+                row_means(&buf, p.width)
+            };
+
+            let (g, f) = row_gain(&row_m, line_rate_hz, 3.0);
             if f > 0.0 {
                 f_hz = f;
             }
-            for (r, row) in buf.chunks_mut(p.width).enumerate() {
-                let gr = g.get(r).copied().unwrap_or(1.0);
-                for v in row.iter_mut() {
-                    *v = (*v as f64 * gr).round().clamp(0.0, 255.0) as u8;
+            for (i, &gv) in g.iter().enumerate() {
+                if i < row_gains_f32.len() {
+                    row_gains_f32[i] = gv as f32;
                 }
             }
         }
-        let g = gains[idx];
-        for v in buf.iter_mut() {
-            *v = (*v as f64 * g).round().clamp(0.0, 255.0) as u8;
+
+        let g_temp = gains[idx] as f32;
+
+        if let Some(ref mut vk_ctx) = vk {
+            match vk_ctx.deflicker_frame(&buf, &mut out_buf, p.width, p.height, p.width, &row_gains_f32, g_temp) {
+                Ok(()) => {
+                    enc_in.write_all(&out_buf).map_err(|e| format!("encoder closed early: {e}"))?;
+                }
+                Err(_) => {
+                    // CPU fallback
+                    if line_rate_hz > 0.0 {
+                        for (r, row) in buf.chunks_mut(p.width).enumerate() {
+                            let gr = row_gains_f32.get(r).copied().unwrap_or(1.0) as f64;
+                            for v in row.iter_mut() {
+                                *v = (*v as f64 * gr).round().clamp(0.0, 255.0) as u8;
+                            }
+                        }
+                    }
+                    for v in buf.iter_mut() {
+                        *v = (*v as f64 * gains[idx]).round().clamp(0.0, 255.0) as u8;
+                    }
+                    enc_in.write_all(&buf).map_err(|e| format!("encoder closed early: {e}"))?;
+                }
+            }
+        } else {
+            // CPU processing
+            if line_rate_hz > 0.0 {
+                for (r, row) in buf.chunks_mut(p.width).enumerate() {
+                    let gr = row_gains_f32.get(r).copied().unwrap_or(1.0) as f64;
+                    for v in row.iter_mut() {
+                        *v = (*v as f64 * gr).round().clamp(0.0, 255.0) as u8;
+                    }
+                }
+            }
+            for v in buf.iter_mut() {
+                *v = (*v as f64 * gains[idx]).round().clamp(0.0, 255.0) as u8;
+            }
+            enc_in.write_all(&buf).map_err(|e| format!("encoder closed early: {e}"))?;
         }
-        enc_in.write_all(&buf).map_err(|e| format!("encoder closed early: {e}"))?;
         idx += 1;
     }
     drop(enc_in);

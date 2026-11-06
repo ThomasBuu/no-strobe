@@ -1,0 +1,60 @@
+#version 450
+
+layout(local_size_x = 64, local_size_y = 4) in;
+
+layout(std430, binding = 0) readonly buffer InputBuffer {
+    uint in_data[];
+};
+
+layout(std430, binding = 1) readonly buffer RowGainBuffer {
+    float row_gains[];
+};
+
+layout(std430, binding = 2) writeonly buffer OutputBuffer {
+    uint out_data[];
+};
+
+layout(push_constant) uniform PushConstants {
+    uint width;
+    uint height;
+    uint stride_words;
+    float temporal_gain;
+} pc;
+
+void main() {
+    uint gx = gl_GlobalInvocationID.x;
+    uint gy = gl_GlobalInvocationID.y;
+
+    if (gy >= pc.height) {
+        return;
+    }
+
+    uint words_per_row = (pc.width + 3u) / 4u;
+    if (gx >= words_per_row) {
+        return;
+    }
+
+    float g = pc.temporal_gain * row_gains[gy];
+    uint idx = gy * pc.stride_words + gx;
+    uint word = in_data[idx];
+
+    uint px_base = gx * 4u;
+    if (px_base + 3u < pc.width) {
+        // Fast path: all 4 bytes are within the image width
+        vec4 px = unpackUnorm4x8(word);
+        vec4 corrected = clamp(px * g, 0.0, 1.0);
+        out_data[idx] = packUnorm4x8(corrected);
+    } else {
+        // Edge case: row ends mid-word (width not a multiple of 4)
+        vec4 px = unpackUnorm4x8(word);
+        vec4 corrected = clamp(px * g, 0.0, 1.0);
+        uint full = packUnorm4x8(corrected);
+
+        uint valid_bytes = pc.width - px_base;
+        uint mask = 0u;
+        for (uint i = 0u; i < valid_bytes; ++i) {
+            mask |= (0xFFu << (i * 8u));
+        }
+        out_data[idx] = (full & mask) | (word & ~mask);
+    }
+}

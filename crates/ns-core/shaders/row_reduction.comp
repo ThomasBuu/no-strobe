@@ -1,0 +1,64 @@
+#version 450
+
+layout(local_size_x = 256, local_size_y = 1) in;
+
+layout(std430, binding = 0) readonly buffer InputBuffer {
+    uint in_data[];
+};
+
+layout(std430, binding = 1) writeonly buffer OutputRowMeans {
+    float out_row_means[];
+};
+
+layout(push_constant) uniform PushConstants {
+    uint width;
+    uint height;
+    uint stride_words;
+} pc;
+
+shared float sdata[256];
+
+void main() {
+    uint y = gl_WorkGroupID.y;
+    uint tid = gl_LocalInvocationID.x;
+
+    if (y >= pc.height) {
+        return;
+    }
+
+    uint words_per_row = (pc.width + 3u) / 4u;
+    float sum = 0.0;
+
+    for (uint col = tid; col < words_per_row; col += 256u) {
+        uint word = in_data[y * pc.stride_words + col];
+        uint px_base = col * 4u;
+        if (px_base + 3u < pc.width) {
+            uvec4 b = uvec4(
+                word & 0xFFu,
+                (word >> 8u) & 0xFFu,
+                (word >> 16u) & 0xFFu,
+                (word >> 24u) & 0xFFu
+            );
+            sum += float(b.x + b.y + b.z + b.w);
+        } else {
+            uint valid = pc.width - px_base;
+            for (uint i = 0u; i < valid; ++i) {
+                sum += float((word >> (i * 8u)) & 0xFFu);
+            }
+        }
+    }
+
+    sdata[tid] = sum;
+    barrier();
+
+    for (uint s = 128u; s > 0u; s >>= 1u) {
+        if (tid < s) {
+            sdata[tid] += sdata[tid + s];
+        }
+        barrier();
+    }
+
+    if (tid == 0u) {
+        out_row_means[y] = sdata[0] / (float(pc.width) * 255.0);
+    }
+}

@@ -51,6 +51,9 @@ object OnDevicePost {
     private fun meanLuma(image: Image): Double {
         val plane = image.planes[0]
         val buf = plane.buffer
+        if (buf.isDirect) {
+            return NsJni.meanLuma(buf, image.width, image.height, plane.rowStride, plane.pixelStride)
+        }
         val rs = plane.rowStride
         val ps = plane.pixelStride
         var sum = 0L
@@ -149,7 +152,6 @@ object OnDevicePost {
         var muxerStarted = false
         var frame = 0
         val info = MediaCodec.BufferInfo()
-        val lut = IntArray(256)
 
         fun drain(endOfStream: Boolean) {
             val enc = encoder ?: return
@@ -202,10 +204,9 @@ object OnDevicePost {
                 while (idx < 0) { drain(false); idx = enc.dequeueInputBuffer(TIMEOUT_US) }
                 val dst = enc.getInputImage(idx) ?: throw PostException("encoder gives no input image")
                 val g = gains.getOrElse(frame) { 1.0 }
-                for (v in 0..255) lut[v] = Math.round(v * g).toInt().coerceIn(0, 255)
-                copyPlane(image.planes[0], image.width, image.height, dst.planes[0], dst.width, dst.height, lut)
-                copyPlane(image.planes[1], image.width / 2, image.height / 2, dst.planes[1], dst.width / 2, dst.height / 2, null)
-                copyPlane(image.planes[2], image.width / 2, image.height / 2, dst.planes[2], dst.width / 2, dst.height / 2, null)
+                copyPlane(image.planes[0], image.width, image.height, dst.planes[0], dst.width, dst.height, g)
+                copyPlane(image.planes[1], image.width / 2, image.height / 2, dst.planes[1], dst.width / 2, dst.height / 2, 1.0)
+                copyPlane(image.planes[2], image.width / 2, image.height / 2, dst.planes[2], dst.width / 2, dst.height / 2, 1.0)
                 val size = dst.width * dst.height * 3 / 2
                 dst.close()
                 enc.queueInputBuffer(idx, 0, size, pts, 0)
@@ -238,12 +239,36 @@ object OnDevicePost {
         }
     }
 
-    /** Copies a plane honouring both sides' row and pixel strides; [lut] maps values (luma gain). */
-    private fun copyPlane(s: Image.Plane, sw: Int, sh: Int, d: Image.Plane, dw: Int, dh: Int, lut: IntArray?) {
+    /** Copies a plane honouring both sides' row and pixel strides; applies [gain]. */
+    private fun copyPlane(
+        s: Image.Plane,
+        sw: Int,
+        sh: Int,
+        d: Image.Plane,
+        dw: Int,
+        dh: Int,
+        gain: Double = 1.0,
+    ) {
         val w = minOf(sw, dw)
         val h = minOf(sh, dh)
         val sb = s.buffer
         val db = d.buffer
+        if (sb.isDirect && db.isDirect) {
+            NsJni.applyPlaneGains(
+                sb,
+                db,
+                w,
+                h,
+                s.rowStride,
+                s.pixelStride,
+                d.rowStride,
+                d.pixelStride,
+                null,
+                gain,
+            )
+            return
+        }
+        val lut = if (gain != 1.0) IntArray(256) { v -> Math.round(v * gain).toInt().coerceIn(0, 255) } else null
         val row = ByteArray(maxOf(s.rowStride, d.rowStride))
         for (y in 0 until h) {
             if (s.pixelStride == 1 && d.pixelStride == 1) {

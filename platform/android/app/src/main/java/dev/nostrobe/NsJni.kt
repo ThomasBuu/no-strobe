@@ -70,6 +70,27 @@ object NsJni {
         exposureUs: Double, fHz: Double, phaseCycles: Double, duty: Double, lineRateHz: Double, rows: Int,
     ): DoubleArray
 
+    private external fun nativeMeanLuma(
+        buffer: java.nio.Buffer,
+        width: Int,
+        height: Int,
+        rowStride: Int,
+        pixelStride: Int,
+    ): Double
+
+    private external fun nativeApplyPlaneGains(
+        srcBuf: java.nio.Buffer,
+        dstBuf: java.nio.Buffer,
+        width: Int,
+        height: Int,
+        srcRowStride: Int,
+        srcPixelStride: Int,
+        dstRowStride: Int,
+        dstPixelStride: Int,
+        rowGains: DoubleArray?,
+        temporalGain: Double,
+    )
+
     /** Extract the vertical row profile from a direct Y-buffer using SIMD. */
     fun extractProfile(
         buffer: java.nio.Buffer,
@@ -80,6 +101,40 @@ object NsJni {
         rowStep: Int = 1,
         colStep: Int = 1,
     ): DoubleArray = nativeExtractProfile(buffer, width, height, rowStride, pixelStride, rowStep, colStep)
+
+    /** Native SIMD/GPU mean luminance of a plane from a direct ByteBuffer. */
+    fun meanLuma(
+        buffer: java.nio.Buffer,
+        width: Int,
+        height: Int,
+        rowStride: Int,
+        pixelStride: Int,
+    ): Double = nativeMeanLuma(buffer, width, height, rowStride, pixelStride)
+
+    /** Native SIMD/GPU gain application between direct ByteBuffers. */
+    fun applyPlaneGains(
+        srcBuf: java.nio.Buffer,
+        dstBuf: java.nio.Buffer,
+        width: Int,
+        height: Int,
+        srcRowStride: Int,
+        srcPixelStride: Int,
+        dstRowStride: Int,
+        dstPixelStride: Int,
+        rowGains: DoubleArray? = null,
+        temporalGain: Double = 1.0,
+    ) = nativeApplyPlaneGains(
+        srcBuf,
+        dstBuf,
+        width,
+        height,
+        srcRowStride,
+        srcPixelStride,
+        dstRowStride,
+        dstPixelStride,
+        rowGains,
+        temporalGain,
+    )
 
     /** Test only: the row profile of a PWM light at [fHz], for the simulated-flicker mode. */
     fun syntheticProfile(

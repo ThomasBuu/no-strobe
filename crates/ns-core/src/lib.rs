@@ -7,6 +7,8 @@ pub mod pwm_controller;
 pub mod restorer;
 pub mod signal;
 pub mod solver;
+#[cfg(feature = "vulkan")]
+pub mod vulkan;
 
 pub use camera::CameraLimits;
 pub use controller::{Command, Controller, State};

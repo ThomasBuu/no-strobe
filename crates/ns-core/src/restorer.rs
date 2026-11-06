@@ -76,3 +76,90 @@ pub fn row_gain(profile: &[f64], line_rate_hz: f64, max_gain: f64) -> (Vec<f64>,
         .collect();
     (gains, f_hz)
 }
+
+
+/// Applies row-wise and temporal gains from a source plane into a destination plane,
+/// honouring row and pixel strides.
+pub fn apply_plane_gains(
+    src: &[u8],
+    dst: &mut [u8],
+    width: usize,
+    height: usize,
+    src_row_stride: usize,
+    src_pixel_stride: usize,
+    dst_row_stride: usize,
+    dst_pixel_stride: usize,
+    row_gains: Option<&[f64]>,
+    temporal_gain: f64,
+) {
+    if width == 0 || height == 0 || src.is_empty() || dst.is_empty() {
+        return;
+    }
+
+    let is_identity = temporal_gain == 1.0 && row_gains.is_none();
+
+    // Fast path: pure copy without gains, contiguous pixel stride
+    if is_identity && src_pixel_stride == 1 && dst_pixel_stride == 1 {
+        let copy_w = width.min(src_row_stride).min(dst_row_stride);
+        for y in 0..height {
+            let s_off = y * src_row_stride;
+            let d_off = y * dst_row_stride;
+            if s_off + copy_w <= src.len() && d_off + copy_w <= dst.len() {
+                dst[d_off..d_off + copy_w].copy_from_slice(&src[s_off..s_off + copy_w]);
+            }
+        }
+        return;
+    }
+
+    // Contiguous pixel strides with gain application
+    if src_pixel_stride == 1 && dst_pixel_stride == 1 {
+        let mut lut = [0u8; 256];
+        let mut last_gain = f64::NAN;
+
+        for y in 0..height {
+            let g = row_gains.and_then(|rg| rg.get(y)).copied().unwrap_or(1.0) * temporal_gain;
+            if g != last_gain {
+                for i in 0..256 {
+                    lut[i] = (i as f64 * g).round().clamp(0.0, 255.0) as u8;
+                }
+                last_gain = g;
+            }
+
+            let s_off = y * src_row_stride;
+            let d_off = y * dst_row_stride;
+            if s_off + width <= src.len() && d_off + width <= dst.len() {
+                let s_row = &src[s_off..s_off + width];
+                let d_row = &mut dst[d_off..d_off + width];
+                for (s, d) in s_row.iter().zip(d_row.iter_mut()) {
+                    *d = lut[*s as usize];
+                }
+            }
+        }
+        return;
+    }
+
+    // Strided path (e.g. interleaved UV pixel_stride == 2)
+    let mut lut = [0u8; 256];
+    let mut last_gain = f64::NAN;
+
+    for y in 0..height {
+        let g = row_gains.and_then(|rg| rg.get(y)).copied().unwrap_or(1.0) * temporal_gain;
+        if g != last_gain {
+            for i in 0..256 {
+                lut[i] = (i as f64 * g).round().clamp(0.0, 255.0) as u8;
+            }
+            last_gain = g;
+        }
+
+        let s_row_off = y * src_row_stride;
+        let d_row_off = y * dst_row_stride;
+
+        for x in 0..width {
+            let s_idx = s_row_off + x * src_pixel_stride;
+            let d_idx = d_row_off + x * dst_pixel_stride;
+            if s_idx < src.len() && d_idx < dst.len() {
+                dst[d_idx] = lut[src[s_idx] as usize];
+            }
+        }
+    }
+}

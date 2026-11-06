@@ -61,3 +61,51 @@ fn gain_stays_flat_on_a_clean_clip() {
     assert_eq!(f, 0.0, "no flicker should be reported");
     assert!(g.iter().all(|v| (v - 1.0).abs() < 1e-9));
 }
+
+
+#[test]
+fn test_apply_plane_gains() {
+    let width = 64;
+    let height = 32;
+    let src_stride = 80;
+    let dst_stride = 80;
+    let mut src = vec![100u8; src_stride * height];
+    let mut dst = vec![0u8; dst_stride * height];
+
+    for y in 0..height {
+        for x in 0..width {
+            src[y * src_stride + x] = ((x + y * 2) % 256) as u8;
+        }
+    }
+
+    let mut row_gains = vec![1.0; height];
+    row_gains[10] = 1.5;
+    let temporal_gain = 1.2;
+
+    ns_core::restorer::apply_plane_gains(
+        &src,
+        &mut dst,
+        width,
+        height,
+        src_stride,
+        1,
+        dst_stride,
+        1,
+        Some(&row_gains),
+        temporal_gain,
+    );
+
+    // Verify row 10
+    let g10 = 1.5 * 1.2;
+    for x in 0..width {
+        let expected = (src[10 * src_stride + x] as f64 * g10).round().clamp(0.0, 255.0) as u8;
+        assert_eq!(dst[10 * dst_stride + x], expected);
+    }
+
+    // Verify row 0
+    let g0 = 1.0 * 1.2;
+    for x in 0..width {
+        let expected = (src[0 * src_stride + x] as f64 * g0).round().clamp(0.0, 255.0) as u8;
+        assert_eq!(dst[0 * dst_stride + x], expected);
+    }
+}
