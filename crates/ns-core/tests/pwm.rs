@@ -197,7 +197,7 @@ fn highest_frame_rate_that_fits_the_period_is_chosen() {
         let mut last = c.on_profile(&profile_for(1000.0, f_hz, phase, 0.3, ROWS as f64 * 240.0, ROWS));
         let mut got = None;
         for _ in 0..900 {
-            phase += 0.0137;
+            phase += 0.3337;
             let line_rate = ROWS as f64 * last.fps;
             last = c.on_profile(&profile_for(last.exposure_us, f_hz, phase, 0.3, line_rate, ROWS));
             if last.state == State::Locked {
@@ -225,7 +225,7 @@ fn blind_sweep_with_phone_limits_locks_on_a_multiple_of_the_period() {
         let mut phase = 0.0;
         let mut last = c.on_profile(&profile_for(1000.0, f_hz, phase, 0.3, LINE_RATE, ROWS));
         for _ in 0..600 {
-            phase += 0.0137;
+            phase += 0.3337;
             last = c.on_profile(&profile_for(last.exposure_us, f_hz, phase, 0.3, LINE_RATE, ROWS));
             if last.state == State::Locked {
                 break;
@@ -251,7 +251,7 @@ fn blind_lock_holds_over_time_and_follows_a_frequency_change() {
     let mut last = c.on_profile(&profile_for(1000.0, f_hz, phase, 0.3, LINE_RATE, ROWS));
     let mut locked_at = None;
     for i in 0..600 {
-        phase += 0.0137;
+        phase += 0.3337;
         last = c.on_profile(&profile_for(last.exposure_us, f_hz, phase, 0.3, LINE_RATE, ROWS));
         if last.state == State::Locked && locked_at.is_none() {
             locked_at = Some(i);
@@ -263,7 +263,7 @@ fn blind_lock_holds_over_time_and_follows_a_frequency_change() {
     let mut min_ratio = f64::INFINITY;
     let mut max_ratio = 0.0f64;
     for _ in 0..600 {
-        phase += 0.0137;
+        phase += 0.3337;
         last = c.on_profile(&profile_for(last.exposure_us, f_hz, phase, 0.3, LINE_RATE, ROWS));
         if last.state == State::Locked {
             locked_frames += 1;
@@ -280,7 +280,7 @@ fn blind_lock_holds_over_time_and_follows_a_frequency_change() {
     f_hz = 640.0;
     let mut relocked = false;
     for _ in 0..900 {
-        phase += 0.0137;
+        phase += 0.3337;
         last = c.on_profile(&profile_for(last.exposure_us, f_hz, phase, 0.3, LINE_RATE, ROWS));
         if last.state == State::Locked {
             let t_us = 1e6 / f_hz;
@@ -304,7 +304,7 @@ fn locked_exposure_never_moves_in_blind_mode() {
     let mut last = c.on_profile(&profile_for(1000.0, f_hz, phase, 0.3, LINE_RATE, ROWS));
     let mut locked_at = None;
     for i in 0..600 {
-        phase += 0.0137;
+        phase += 0.3337;
         last = c.on_profile(&profile_for(last.exposure_us, f_hz, phase, 0.3, LINE_RATE, ROWS));
         if last.state == State::Locked {
             locked_at = Some(i);
@@ -317,7 +317,7 @@ fn locked_exposure_never_moves_in_blind_mode() {
     let k = (fixed / t_us).round();
     assert!((fixed - k * t_us).abs() < 0.01 * t_us, "locked off the null: {fixed} us");
     for i in 0..300 {
-        phase += 0.0137;
+        phase += 0.3337;
         last = c.on_profile(&profile_for(last.exposure_us, f_hz, phase, 0.3, LINE_RATE, ROWS));
         assert_eq!(last.state, State::Locked, "left the lock at frame {i} after locking at {start}");
         assert_eq!(last.exposure_us, fixed, "exposure moved to {} us at frame {i}", last.exposure_us);
@@ -326,7 +326,8 @@ fn locked_exposure_never_moves_in_blind_mode() {
 
 #[test]
 fn noisy_blind_sweep_never_locks_on_a_false_minimum() {
-    // A real sensor adds noise to every row: a "minimum" found in noise must not count.
+    // A real sensor adds noise to every row: a "minimum" found in noise must not count. The level is
+    // the measured one: temporal noise of a real scene at ISO ~3000 is 0.004-0.009 of the mean luma.
     for (f_hz, seed0) in [(500.0, 1u64), (500.0, 7), (800.0, 3), (1200.0, 11), (300.0, 5)] {
         let mut c = PwmController::new(phone_limits(), 0.0);
         let mut seed = seed0;
@@ -334,12 +335,12 @@ fn noisy_blind_sweep_never_locks_on_a_false_minimum() {
         let mut noisy = |e: f64, phase: f64, seed: &mut u64| -> Vec<f64> {
             profile_for(e, f_hz, phase, 0.3, LINE_RATE, ROWS)
                 .into_iter()
-                .map(|v| v + noise(seed, 0.01))
+                .map(|v| v + noise(seed, 0.006))
                 .collect()
         };
         let mut last = c.on_profile(&noisy(1000.0, phase, &mut seed));
         for _ in 0..1500 {
-            phase += 0.0137;
+            phase += 0.3337;
             last = c.on_profile(&noisy(last.exposure_us, phase, &mut seed));
             if last.state == State::Locked {
                 // What matters is the banding left at the locked exposure, against the banding
@@ -367,7 +368,7 @@ fn locks_on_a_long_multiple_of_the_period_when_a_shutter_fraction_is_set() {
     let mut phase = 0.0;
     let mut last = c.on_profile(&profile_for(1000.0, f_hz, phase, 0.3, LINE_RATE, ROWS));
     for _ in 0..1500 {
-        phase += 0.0137;
+        phase += 0.3337;
         last = c.on_profile(&profile_for(last.exposure_us, f_hz, phase, 0.3, LINE_RATE, ROWS));
     }
     assert_eq!(last.state, State::Locked);
@@ -376,4 +377,52 @@ fn locks_on_a_long_multiple_of_the_period_when_a_shutter_fraction_is_set() {
     assert!(k >= 6.0, "stayed on a short exposure: {} us (k = {k})", last.exposure_us);
     assert!((last.exposure_us - k * t_us).abs() < 0.02 * t_us, "{} us is not a multiple of {t_us}", last.exposure_us);
     assert!(last.exposure_us <= 1e6 / 30.0, "longer than a frame: {} us", last.exposure_us);
+}
+
+/// What a real lamp showed: the scene structure along the rows is several times larger than the
+/// flicker (a bright lamp, cables, a wall edge), static from frame to frame. The spatial banding
+/// metric stayed flat (0.022 at every exposure from 4 ms) while the per-row variation between
+/// frames had clean nulls at 10, 20 and 30 ms.
+#[test]
+fn locks_on_a_multiple_of_the_period_in_a_scene_full_of_structure() {
+    for f_hz in [100.0, 300.0, 500.0, 1000.0] {
+        let mut c = PwmController::new(phone_limits(), 0.0);
+        // Static structure, ~3x the flicker, identical in every frame.
+        let scene: Vec<f64> = (0..ROWS)
+            .map(|i| {
+                let x = i as f64;
+                0.55 + 0.30 * (2.0 * std::f64::consts::PI * x / 97.0).sin()
+                    + 0.20 * (2.0 * std::f64::consts::PI * x / 41.0 + 1.0).sin()
+                    + if (180..260).contains(&i) { 0.9 } else { 0.0 }
+            })
+            .collect();
+        let frame = |e: f64, phase: f64| -> Vec<f64> {
+            profile_for(e, f_hz, phase, 0.3, LINE_RATE, ROWS)
+                .iter()
+                .zip(&scene)
+                .map(|(fl, s)| s * (0.75 + 0.25 * fl))
+                .collect()
+        };
+        let mut phase = 0.0;
+        let mut last = c.on_profile(&frame(1000.0, phase));
+        for _ in 0..2500 {
+            phase += 0.3337;
+            last = c.on_profile(&frame(last.exposure_us, phase));
+            if std::env::var("TRACE").is_ok() && (phase * 3.0) as u64 % 60 == 0 {
+                eprintln!("{:.0} Hz  e={:.0} us {:?} f={:.1}", f_hz, last.exposure_us, last.state, c.frequency_hz());
+            }
+            if last.state == State::Locked {
+                break;
+            }
+        }
+        assert_eq!(last.state, State::Locked, "never locked at {f_hz} Hz in a structured scene");
+        let t_us = 1e6 / f_hz;
+        let k = (last.exposure_us / t_us).round();
+        assert!(k >= 1.0, "{f_hz} Hz: locked below one period: {} us", last.exposure_us);
+        assert!(
+            (last.exposure_us - k * t_us).abs() < 0.06 * t_us,
+            "{f_hz} Hz: {} us is not a multiple of {t_us} us",
+            last.exposure_us
+        );
+    }
 }

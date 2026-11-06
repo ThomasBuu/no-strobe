@@ -31,12 +31,18 @@ const NOISE_FLOOR: f64 = 0.004;
 const MIN_LUMA: f64 = 0.02;
 /// A blind lock is believed only if the metric at the null is below this fraction of the
 /// metric 25 % away on both sides (a true null is |sin(pi e f)|-shaped: ~0 against ~0.7).
-const VERIFY_RATIO: f64 = 0.5;
+const VERIFY_RATIO: f64 = 0.35;
+/// Temporal banding (relative to the mean luma) under this is noise, not flicker.
+const TEMPORAL_FLOOR: f64 = 0.015;
 const MIN_HZ: f64 = 100.0;
 const MAX_HZ: f64 = 5000.0;
 /// Frames to spend on one frame rate before dropping to the next: the profile has to be read
 /// at that rate long enough to measure its banding period.
 const SEARCH_FPS_FRAMES: usize = 24;
+/// After the frame-rate descent has found no flicker period in the rows, exposures are swept instead.
+/// In a real scene the period does not show in the rows (a fast readout shows about one cycle per
+/// frame, drowned in the scene structure), but the exposure sweep with the temporal metric does
+/// find the nulls (measured on a real 100 Hz lamp).
 
 #[derive(Clone, Copy, PartialEq)]
 enum Phase {
@@ -87,8 +93,13 @@ pub struct PwmController {
     shutter_fraction: f64,
     /// Banding metric summed over the frames of the current trial (averaged at its end).
     trial_acc: f64,
+    /// Profiles of the current trial (same exposure): the flicker metric is temporal.
+    trial_profiles: Vec<Vec<f64>>,
+    temporal_max: f64,
     trial_n: usize,
     verify_stage: u8,
+    /// The verification under way is of the first, coarse minimum: f is not set yet.
+    verify_coarse: bool,
     verify_frames: usize,
     verify_centre: f64,
     verify_hi_e: f64,
@@ -129,8 +140,11 @@ impl PwmController {
             rechecking: false,
             shutter_fraction: 0.0,
             trial_acc: 0.0,
+            trial_profiles: Vec::new(),
+            temporal_max: 0.0,
             trial_n: 0,
             verify_stage: 0,
+            verify_coarse: false,
             verify_frames: 0,
             verify_centre: 0.0,
             verify_hi_e: 0.0,
@@ -233,6 +247,37 @@ impl PwmController {
         }
     }
 
+    /// Sweep exposures with the temporal metric, starting at the geometric centre of the range.
+    fn start_blind_sweep(&mut self) -> crate::controller::Command {
+        self.f_hz = 0.0;
+        self.confidence = 0.0;
+        self.hill_base = (self.hill_min() * self.hill_cap()).sqrt();
+        self.hill_exposure = self.hill_base;
+        self.hill_step = 1.25;
+        self.probe = 0;
+        self.probe_res = [0.0; 3];
+        self.flicker_seen = false;
+        self.frames_since_check = 0;
+        self.trial_acc = 0.0;
+        self.trial_n = 0;
+        self.trial_profiles.clear();
+        self.temporal_max = 0.0;
+        self.phase = Phase::Hill;
+        self.emit(self.hill_exposure, State::Search, 0.0)
+    }
+
+    /// Longest exposure the climb may use. Before the flicker is found it stays near one period of
+    /// the slowest flicker in range: a long exposure integrates the signal away (relative
+    /// modulation ~ 1 / (pi f e)) and the minima lose their contrast against the noise.
+    fn hill_cap(&self) -> f64 {
+        // Free once the lock is verified (`rechecking`, `scale_up`) or when the row rate is known.
+        if self.rechecking || self.line_rate_hz > 0.0 {
+            self.exposure_cap()
+        } else {
+            self.exposure_cap().min(1.2e6 / MIN_HZ)
+        }
+    }
+
     fn search(&mut self, profile: &[f64]) -> crate::controller::Command {
         if self.profiles.len() < PROFILE_KEEP {
             return self.emit(self.limits.min_exposure_us, State::Search, 0.0);
@@ -282,6 +327,10 @@ impl PwmController {
         self.search_frames += 1;
         if self.search_frames >= SEARCH_FPS_FRAMES {
             self.search_frames = 0;
+            if self.fps_idx == 0 {
+                // Slowest frame rate reached and still no period in the rows: sweep exposures.
+                return self.start_blind_sweep();
+            }
             self.fps_idx = self.fps_idx.saturating_sub(1);
             self.fps = self.limits.supported_fps[self.fps_idx];
         }
@@ -300,12 +349,24 @@ impl PwmController {
         // Every frame of the trial counts: the average has a third of the noise of one frame.
         self.trial_acc += pwm::banding_metric(profile, self.hill_exposure);
         self.trial_n += 1;
+        self.trial_profiles.push(profile.to_vec());
         self.amp_max = self.amp_max.max(pwm::banding_amplitude(profile));
         if self.frames_since_check < TRIAL_FRAMES {
             return self.emit(self.hill_exposure, progress, self.confidence);
         }
         self.frames_since_check = 0;
-        self.probe_res[self.probe] = self.trial_acc / self.trial_n.max(1) as f64;
+        // The metric is TEMPORAL (see `temporal_banding`): in a real scene the row-to-row structure
+        // is the scene, not the flicker.
+        let temporal = pwm::temporal_banding(&self.trial_profiles);
+        self.temporal_max = self.temporal_max.max(temporal);
+        self.probe_res[self.probe] = if self.trial_profiles.len() >= 3 {
+            // No factor of the exposure: relative modulation m|sin(pi f e)|/(pi f e) already falls
+            // toward the first null at 1/f; times e it would also vanish at e -> 0 (a false null).
+            temporal
+        } else {
+            self.trial_acc / self.trial_n.max(1) as f64
+        };
+        self.trial_profiles.clear();
         self.trial_acc = 0.0;
         self.trial_n = 0;
         self.amp_max = self.amp_max.max(pwm::banding_amplitude(profile));
@@ -314,7 +375,7 @@ impl PwmController {
         if self.probe < 3 {
             // Probe the centre, then one step up, then one step down.
             let next = if self.probe == 1 {
-                (self.hill_base * self.hill_step).min(self.exposure_cap())
+                (self.hill_base * self.hill_step).min(self.hill_cap())
             } else {
                 (self.hill_base / self.hill_step).max(self.hill_min())
             };
@@ -330,8 +391,9 @@ impl PwmController {
         // three probes are: far from a null they differ little (sin near its peak) and the
         // climb still has to move. A claimed minimum is checked separately below.
         let _ = (hi, lo);
-        let evidence = self.amp_max > NOISE_FLOOR && self.luma_last >= MIN_LUMA;
+        let evidence = self.temporal_max > TEMPORAL_FLOOR && self.luma_last >= MIN_LUMA;
         self.amp_max = 0.0;
+        self.temporal_max = 0.0;
         if evidence {
             self.flicker_seen = true;
             // Reported as confidence so the app knows the climb is on a real signal and
@@ -372,7 +434,7 @@ impl PwmController {
         if best_idx == 0 {
             self.hill_step = 1.0 + (self.hill_step - 1.0) * 0.6;
         }
-        self.hill_base = best.clamp(self.hill_min(), self.exposure_cap());
+        self.hill_base = best.clamp(self.hill_min(), self.hill_cap());
         self.hill_exposure = self.hill_base;
         if self.rechecking && (self.hill_base / self.best_exposure - 1.0).abs() > 0.15 {
             // The null moved far away: this is no longer the same flicker.
@@ -384,11 +446,12 @@ impl PwmController {
             return self.emit(self.limits.min_exposure_us, State::Search, 0.0);
         }
         if self.line_rate_hz == 0.0 && self.hill_step < SWEEP_COARSE && self.f_hz == 0.0 {
-            // Local banding minimum: this exposure is k / f for some k. The climb
-            // continues at a finer step, so k is not assumed to be 1.
-            self.f_hz = 1e6 / self.hill_base;
-            self.confidence = 0.5;
-            self.hill_step = 1.02;
+            // Local banding minimum, but a coarse one (steps of ~5 %) can be a dip of the noise or
+            // of the envelope: measured on a real 100 Hz lamp the climb fixed f = 1082 Hz on a
+            // shallow dip near 0.9 ms and then refined around nothing. Check 25 % above and below
+            // BEFORE trusting it; `verify` sets f when the dip is deep.
+            self.verify_coarse = true;
+            return self.begin_verify();
         }
         if self.hill_step < HILL_FINE && self.line_rate_hz == 0.0 && !self.rechecking {
             return self.begin_verify();
@@ -471,6 +534,7 @@ impl PwmController {
         self.verify_frames = 0;
         self.trial_acc = 0.0;
         self.trial_n = 0;
+        self.trial_profiles.clear();
         self.phase = Phase::Verify;
         self.emit(self.verify_hi_e, State::Search, self.confidence)
     }
@@ -480,11 +544,17 @@ impl PwmController {
         let e = if self.verify_stage == 0 { self.verify_hi_e } else { self.verify_lo_e };
         self.trial_acc += pwm::banding_metric(profile, e);
         self.trial_n += 1;
+        self.trial_profiles.push(profile.to_vec());
         if self.verify_frames < TRIAL_FRAMES {
             return self.emit(e, State::Search, self.confidence);
         }
         self.verify_frames = 0;
-        let m = self.trial_acc / self.trial_n.max(1) as f64;
+        let m = if self.trial_profiles.len() >= 3 {
+            pwm::temporal_banding(&self.trial_profiles)
+        } else {
+            self.trial_acc / self.trial_n.max(1) as f64
+        };
+        self.trial_profiles.clear();
         self.trial_acc = 0.0;
         self.trial_n = 0;
         if self.verify_stage == 0 {
@@ -504,6 +574,23 @@ impl PwmController {
             far_e = self.verify_lo_e;
         }
         let deep = far.is_infinite() || self.verify_centre < VERIFY_RATIO * far;
+        if deep && self.verify_coarse {
+            // The coarse minimum is a real null: this exposure is k / f for some k. The fine
+            // climb continues from here, so k is not assumed to be 1.
+            self.verify_coarse = false;
+            self.f_hz = 1e6 / self.hill_base;
+            self.confidence = 0.5;
+            self.hill_step = 1.02;
+            self.probe = 0;
+            self.probe_res = [0.0; 3];
+            self.frames_since_check = 0;
+            self.trial_acc = 0.0;
+            self.trial_n = 0;
+            self.trial_profiles.clear();
+            self.phase = Phase::Hill;
+            self.hill_exposure = self.hill_base;
+            return self.emit(self.hill_exposure, State::Search, self.confidence);
+        }
         if deep {
             self.best_exposure = self.hill_base;
             self.best_residual = (self.verify_centre / self.hill_base).max(0.002);
@@ -516,6 +603,7 @@ impl PwmController {
             return self.emit(self.best_exposure, State::Locked, self.confidence);
         }
         // Not a null: forget this frequency and keep climbing from the lower far probe.
+        self.verify_coarse = false;
         self.f_hz = 0.0;
         self.confidence = 0.3;
         self.hill_step = 1.25;

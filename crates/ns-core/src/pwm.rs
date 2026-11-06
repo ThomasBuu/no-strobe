@@ -168,6 +168,16 @@ pub fn estimate_period_rows(profile: &[f64], min_rows: f64, max_rows: f64) -> Op
     if best_c <= 0.0 {
         return None;
     }
+    // A real period anti-correlates at half its length: shifting the row scan by half a flicker
+    // period turns every bright pulse dark. Noise has no such structure, so a peak found in a
+    // profile that is mostly noise (a long exposure integrating many cycles) is rejected here.
+    let half = (idx + lo) / 2;
+    if half >= 1 {
+        let c_half = autocorr(&x, half) / norm;
+        if c_half > -0.25 * best_c {
+            return None;
+        }
+    }
     let left = if idx > 0 { c[idx - 1] } else { best_c };
     let right = if idx + 1 < c.len() { c[idx + 1] } else { best_c };
     let denom = left - 2.0 * best_c + right;
@@ -208,6 +218,35 @@ pub fn pick_k(f_hz: f64, limits: &crate::camera::CameraLimits, fps: f64) -> Opti
 /// removes the decay and leaves isolated minima exactly at `e = k / f`.
 pub fn banding_metric(profile: &[f64], exposure_us: f64) -> f64 {
     banding_amplitude(profile) * exposure_us
+}
+
+/// Flicker as change *between frames*: for each row the standard deviation of its value over
+/// `frames` (same exposure, phases that differ), averaged over the rows and divided by the mean
+/// luma. Anything static along the rows (the lamp, the cables, the walls) cancels; flicker,
+/// whose phase moves from frame to frame, stays. Zero (to the noise) at an exposure that
+/// integrates whole periods. Measured on a real lamp (100 Hz): 0.074 at 4 ms against 0.009 at
+/// 10 ms, while the spatial `banding_amplitude` stayed flat (0.022) because the scene structure
+/// dominated. Blind spot: a flicker whose frequency is a whole multiple of the frame rate has the
+/// same phase in every frame.
+pub fn temporal_banding(frames: &[Vec<f64>]) -> f64 {
+    let m = frames.len();
+    if m < 2 {
+        return 0.0;
+    }
+    let n = frames.iter().map(|f| f.len()).min().unwrap_or(0);
+    if n == 0 {
+        return 0.0;
+    }
+    let mut sum_std = 0.0;
+    let mut sum_mean = 0.0;
+    for i in 0..n {
+        let mu = frames.iter().map(|f| f[i]).sum::<f64>() / m as f64;
+        let var = frames.iter().map(|f| (f[i] - mu) * (f[i] - mu)).sum::<f64>() / m as f64;
+        sum_std += var.sqrt();
+        sum_mean += mu;
+    }
+    let mean = sum_mean / n as f64;
+    if mean <= 1e-9 { 0.0 } else { (sum_std / n as f64) / mean }
 }
 
 /// Banding amplitude of a profile: standard deviation after detrending.
