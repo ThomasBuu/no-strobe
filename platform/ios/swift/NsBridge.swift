@@ -112,6 +112,24 @@ public final class PwmSyncController {
         )
     }
 
+    /// Sets the hardware pipeline depth in frames for lead prediction.
+    public func setPipelineDepth(_ depth: Double) {
+        if let h = handle {
+            ns_set_pipeline_depth(h, depth)
+        }
+    }
+
+    /// Compute per-row gains to flatten rolling-shutter banding in one frame.
+    public static func rowGain(profile: [Double], lineRateHz: Double, maxGain: Double = 3.0) -> (gains: [Double], fHz: Double) {
+        var out = [Double](repeating: 1.0, count: profile.count)
+        let fHz = profile.withUnsafeBufferPointer { pBuf in
+            out.withUnsafeMutableBufferPointer { oBuf in
+                ns_row_gain(pBuf.baseAddress, pBuf.count, lineRateHz, maxGain, oBuf.baseAddress)
+            }
+        }
+        return (out, fHz)
+    }
+
     deinit {
         if handle != nil {
             ns_destroy_pwm(handle)

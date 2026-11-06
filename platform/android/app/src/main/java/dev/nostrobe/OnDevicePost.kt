@@ -25,12 +25,12 @@ object OnDevicePost {
 
     class PostException(message: String) : Exception(message)
 
-    fun fix(src: File, dst: File, onProgress: (Int) -> Unit) {
+    fun fix(src: File, dst: File, lineRateHz: Double = 0.0, onProgress: (Int) -> Unit) {
         val means = ArrayList<Double>()
         decode(src) { image, _ -> means.add(meanLuma(image)); onProgress(0) }
         if (means.isEmpty()) throw PostException("no frames decoded")
         val gains = temporalGain(means.toDoubleArray(), WINDOW, MAX_GAIN)
-        encodeWithGains(src, dst, gains, onProgress)
+        encodeWithGains(src, dst, gains, lineRateHz, onProgress)
     }
 
     /** Same formula as `ns_core::restorer::temporal_gain`. */
@@ -131,7 +131,7 @@ object OnDevicePost {
         }
     }
 
-    private fun encodeWithGains(srcFile: File, dstFile: File, gains: DoubleArray, onProgress: (Int) -> Unit) {
+    private fun encodeWithGains(srcFile: File, dstFile: File, gains: DoubleArray, lineRateHz: Double, onProgress: (Int) -> Unit) {
         val rotation = MediaMetadataRetriever().use { r ->
             r.setDataSource(srcFile.path)
             r.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_ROTATION)?.toIntOrNull() ?: 0
@@ -204,9 +204,16 @@ object OnDevicePost {
                 while (idx < 0) { drain(false); idx = enc.dequeueInputBuffer(TIMEOUT_US) }
                 val dst = enc.getInputImage(idx) ?: throw PostException("encoder gives no input image")
                 val g = gains.getOrElse(frame) { 1.0 }
-                copyPlane(image.planes[0], image.width, image.height, dst.planes[0], dst.width, dst.height, g)
-                copyPlane(image.planes[1], image.width / 2, image.height / 2, dst.planes[1], dst.width / 2, dst.height / 2, 1.0)
-                copyPlane(image.planes[2], image.width / 2, image.height / 2, dst.planes[2], dst.width / 2, dst.height / 2, 1.0)
+
+                val rowGains: DoubleArray? = if (lineRateHz > 0.0) {
+                    val p0 = image.planes[0]
+                    val prof = NsJni.extractProfile(p0.buffer, image.width, image.height, p0.rowStride, p0.pixelStride)
+                    NsJni.rowGain(prof, lineRateHz)
+                } else null
+
+                copyPlane(image.planes[0], image.width, image.height, dst.planes[0], dst.width, dst.height, g, rowGains)
+                copyPlane(image.planes[1], image.width / 2, image.height / 2, dst.planes[1], dst.width / 2, dst.height / 2, 1.0, null)
+                copyPlane(image.planes[2], image.width / 2, image.height / 2, dst.planes[2], dst.width / 2, dst.height / 2, 1.0, null)
                 val size = dst.width * dst.height * 3 / 2
                 dst.close()
                 enc.queueInputBuffer(idx, 0, size, pts, 0)
@@ -239,7 +246,7 @@ object OnDevicePost {
         }
     }
 
-    /** Copies a plane honouring both sides' row and pixel strides; applies [gain]. */
+    /** Copies a plane honouring both sides' row and pixel strides; applies [gain] and optional [rowGains]. */
     private fun copyPlane(
         s: Image.Plane,
         sw: Int,
@@ -248,6 +255,7 @@ object OnDevicePost {
         dw: Int,
         dh: Int,
         gain: Double = 1.0,
+        rowGains: DoubleArray? = null,
     ) {
         val w = minOf(sw, dw)
         val h = minOf(sh, dh)
@@ -263,7 +271,7 @@ object OnDevicePost {
                 s.pixelStride,
                 d.rowStride,
                 d.pixelStride,
-                null,
+                rowGains,
                 gain,
             )
             return
@@ -271,16 +279,21 @@ object OnDevicePost {
         val lut = if (gain != 1.0) IntArray(256) { v -> Math.round(v * gain).toInt().coerceIn(0, 255) } else null
         val row = ByteArray(maxOf(s.rowStride, d.rowStride))
         for (y in 0 until h) {
+            val effLut = if (rowGains != null && y < rowGains.size) {
+                val combined = gain * rowGains[y]
+                IntArray(256) { v -> Math.round(v * combined).toInt().coerceIn(0, 255) }
+            } else lut
+
             if (s.pixelStride == 1 && d.pixelStride == 1) {
                 sb.position(y * s.rowStride)
                 sb.get(row, 0, w)
-                if (lut != null) for (x in 0 until w) row[x] = lut[row[x].toInt() and 0xFF].toByte()
+                if (effLut != null) for (x in 0 until w) row[x] = effLut[row[x].toInt() and 0xFF].toByte()
                 db.position(y * d.rowStride)
                 db.put(row, 0, w)
             } else {
                 for (x in 0 until w) {
                     var v = sb.get(y * s.rowStride + x * s.pixelStride).toInt() and 0xFF
-                    if (lut != null) v = lut[v]
+                    if (effLut != null) v = effLut[v]
                     db.put(y * d.rowStride + x * d.pixelStride, v.toByte())
                 }
             }

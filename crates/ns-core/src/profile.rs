@@ -99,17 +99,119 @@ pub fn extract_row_profile(
     out
 }
 
-/// Sum contiguous row bytes. Uses NEON SIMD on aarch64.
+/// Sum contiguous row bytes. Uses ARMv9 SVE2, dotprod, or NEON SIMD on aarch64.
 #[inline]
 fn sum_contiguous_row(slice: &[u8]) -> u64 {
     #[cfg(target_arch = "aarch64")]
     {
-        unsafe { sum_contiguous_row_neon(slice) }
+        #[cfg(target_feature = "sve2")]
+        {
+            unsafe { sum_contiguous_row_sve2(slice) }
+        }
+        #[cfg(not(target_feature = "sve2"))]
+        {
+            if std::arch::is_aarch64_feature_detected!("sve2") {
+                unsafe { sum_contiguous_row_sve2(slice) }
+            } else if std::arch::is_aarch64_feature_detected!("dotprod") {
+                unsafe { sum_contiguous_row_dotprod(slice) }
+            } else {
+                unsafe { sum_contiguous_row_neon(slice) }
+            }
+        }
     }
     #[cfg(not(target_arch = "aarch64"))]
     {
         sum_contiguous_row_scalar(slice)
     }
+}
+
+/// ARMv9 SVE2 implementation of contiguous row summation.
+/// Uses vector-length-agnostic predication and wide 4-way byte dot products.
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "sve2")]
+unsafe fn sum_contiguous_row_sve2(slice: &[u8]) -> u64 {
+    let len = slice.len();
+    if len == 0 {
+        return 0;
+    }
+    let ptr = slice.as_ptr();
+    let mut sum: u64;
+    core::arch::asm!(
+        ".arch armv9-a+sve2",
+        "ptrue p1.b",
+        "mov z1.b, #1",
+        "mov z0.s, #0",
+        "mov x2, #0",
+        "2:",
+        "whilelt p0.b, x2, {len}",
+        "b.none 3f",
+        "ld1b z2.b, p0/z, [{ptr}, x2]",
+        "udot z0.s, z2.b, z1.b",
+        "incb x2",
+        "b 2b",
+        "3:",
+        "ptrue p0.s",
+        "uaddv d0, p0, z0.s",
+        "fmov {sum}, d0",
+        ptr = in(reg) ptr,
+        len = in(reg) len,
+        sum = out(reg) sum,
+        out("x2") _,
+        out("p0") _,
+        out("p1") _,
+        out("z0") _,
+        out("z1") _,
+        out("z2") _,
+    );
+    sum
+}
+
+/// ARMv8.2-A / ARMv9 NEON dot-product implementation of contiguous row summation.
+/// Accumulates 16 bytes per instruction into four 32-bit integer lanes.
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "dotprod")]
+unsafe fn sum_contiguous_row_dotprod(slice: &[u8]) -> u64 {
+    use std::arch::aarch64::*;
+    let len = slice.len();
+    let ptr = slice.as_ptr();
+    let chunks = len / 16;
+    let remainder = len % 16;
+
+    let ones = vdupq_n_u8(1);
+    let mut acc0 = vdupq_n_u32(0);
+    let mut acc1 = vdupq_n_u32(0);
+    let mut acc2 = vdupq_n_u32(0);
+    let mut acc3 = vdupq_n_u32(0);
+
+    let mut i = 0;
+    while i + 4 <= chunks {
+        let v0 = vld1q_u8(ptr.add(i * 16));
+        let v1 = vld1q_u8(ptr.add((i + 1) * 16));
+        let v2 = vld1q_u8(ptr.add((i + 2) * 16));
+        let v3 = vld1q_u8(ptr.add((i + 3) * 16));
+
+        acc0 = vdotq_u32(acc0, v0, ones);
+        acc1 = vdotq_u32(acc1, v1, ones);
+        acc2 = vdotq_u32(acc2, v2, ones);
+        acc3 = vdotq_u32(acc3, v3, ones);
+
+        i += 4;
+    }
+
+    let mut acc = vaddq_u32(vaddq_u32(acc0, acc1), vaddq_u32(acc2, acc3));
+
+    while i < chunks {
+        let v = vld1q_u8(ptr.add(i * 16));
+        acc = vdotq_u32(acc, v, ones);
+        i += 1;
+    }
+
+    let mut sum = vaddvq_u32(acc) as u64;
+    let rem_start = chunks * 16;
+    for k in 0..remainder {
+        sum += *ptr.add(rem_start + k) as u64;
+    }
+    sum
 }
 
 #[cfg(target_arch = "aarch64")]

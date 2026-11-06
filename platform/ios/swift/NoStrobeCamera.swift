@@ -32,6 +32,7 @@ public final class NoStrobeCamera: NSObject, AVCaptureVideoDataOutputSampleBuffe
             // AVFoundation publishes no row readout rate, so the controller sweeps exposures
             // and calibrates the flicker period from the banding metric.
             pwm = PwmSyncController(limits: limits, lineRateHz: 0)
+            pwm?.setPipelineDepth(2.0)
         } else {
             strobe = SyncController(limits: limits)
         }

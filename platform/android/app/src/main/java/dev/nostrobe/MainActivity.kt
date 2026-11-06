@@ -713,7 +713,8 @@ class MainActivity : AppCompatActivity() {
             try {
                 val t0 = System.currentTimeMillis()
                 android.util.Log.i("nostrobe", "phone post: start (${clip.length()} bytes)")
-                OnDevicePost.fix(clip, out) { pct ->
+                val lr = camera?.rowRateHz ?: 0.0
+                OnDevicePost.fix(clip, out, lr) { pct ->
                     runOnUiThread { status.text = "post-processing on the phone: $pct %" }
                 }
                 val name = "nostrobe-" + java.text.SimpleDateFormat("yyyyMMdd-HHmmss", java.util.Locale.US)

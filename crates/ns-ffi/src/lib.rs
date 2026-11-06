@@ -179,3 +179,26 @@ pub unsafe extern "C" fn ns_destroy_pwm(handle: *mut PwmController) {
 pub unsafe extern "C" fn ns_set_pipeline_depth(handle: *mut PwmController, depth: f64) {
     (*handle).set_pipeline_depth(depth);
 }
+
+/// Compute per-row gains to flatten rolling-shutter banding in one frame.
+/// Returns the estimated flicker frequency in Hz.
+///
+/// # Safety
+/// `profile_ptr` must point to `profile_len` elements. `out_gains` must have space for `profile_len` f64 elements.
+#[no_mangle]
+pub unsafe extern "C" fn ns_row_gain(
+    profile_ptr: *const f64,
+    profile_len: usize,
+    line_rate_hz: f64,
+    max_gain: f64,
+    out_gains: *mut f64,
+) -> f64 {
+    if profile_ptr.is_null() || out_gains.is_null() || profile_len == 0 {
+        return 0.0;
+    }
+    let profile = std::slice::from_raw_parts(profile_ptr, profile_len);
+    let (gains, f_hz) = ns_core::restorer::row_gain(profile, line_rate_hz, max_gain);
+    let count = gains.len().min(profile_len);
+    std::ptr::copy_nonoverlapping(gains.as_ptr(), out_gains, count);
+    f_hz
+}

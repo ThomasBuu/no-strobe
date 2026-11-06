@@ -9,12 +9,7 @@
 
 use crate::pwm::estimate_f;
 
-/// Per-frame gain that flattens temporal flicker.
-///
-/// `means[i]` is the mean luminance of frame `i`. The gain is the local mean
-/// divided by the frame mean, so a frame that caught a flash is pulled down to
-/// the level of its neighbours. Gains are clamped: a frame that caught almost
-/// no light cannot be recovered without amplifying noise.
+/// Per-frame gain that flattens temporal flicker using a simple moving window.
 pub fn temporal_gain(means: &[f64], window: usize, max_gain: f64) -> Vec<f64> {
     let w = window.max(3) | 1;
     let half = w / 2;
@@ -35,6 +30,66 @@ pub fn temporal_gain(means: &[f64], window: usize, max_gain: f64) -> Vec<f64> {
         .collect()
 }
 
+/// Adaptive temporal gain with edge-preserving bilateral filtering.
+///
+/// Blends local temporal brightness using Gaussian temporal weights while
+/// respecting scene cuts and intentional lighting blackouts via photometric similarity.
+pub fn temporal_gain_adaptive(
+    means: &[f64],
+    window: usize,
+    max_gain: f64,
+    cut_threshold: f64,
+) -> Vec<f64> {
+    let w = window.max(3) | 1;
+    let half = (w / 2) as isize;
+    let n = means.len();
+    if n == 0 {
+        return Vec::new();
+    }
+    let sigma_t = (half as f64).max(1.0);
+    let sigma_v = cut_threshold.max(0.01);
+
+    (0..n)
+        .map(|i| {
+            let center_val = means[i];
+            if center_val <= 0.0 {
+                return 1.0;
+            }
+
+            let mut weighted_sum = 0.0;
+            let mut weight_sum = 0.0;
+
+            let lo = (i as isize - half).max(0) as usize;
+            let hi = ((i as isize + half + 1).min(n as isize)) as usize;
+
+            for j in lo..hi {
+                let dt = (j as isize - i as isize) as f64;
+                let dv = (means[j] - center_val).abs();
+
+                // If difference exceeds 2x threshold, do not blend across the hard cut
+                if dv > cut_threshold * 2.0 {
+                    continue;
+                }
+
+                let wt = (-0.5 * (dt / sigma_t).powi(2)).exp();
+                let wv = (-0.5 * (dv / sigma_v).powi(2)).exp();
+                let weight = wt * wv;
+
+                weighted_sum += means[j] * weight;
+                weight_sum += weight;
+            }
+
+            let target = if weight_sum > 1e-6 {
+                weighted_sum / weight_sum
+            } else {
+                center_val
+            };
+
+            (target / center_val).min(max_gain).max(1.0 / max_gain)
+        })
+        .collect()
+}
+
 /// Per-row gain that flattens banding in one frame.
 ///
 /// `profile` is the per-row luminance of the frame. The flicker frequency is
@@ -46,7 +101,13 @@ pub fn row_gain(profile: &[f64], line_rate_hz: f64, max_gain: f64) -> (Vec<f64>,
     if profile.len() < 8 || line_rate_hz <= 0.0 {
         return (vec![1.0; profile.len()], 0.0);
     }
-    let Some((f_hz, _)) = estimate_f(profile, line_rate_hz, 100.0, 5000.0) else {
+    let min_rows = (line_rate_hz / 5000.0).max(2.0);
+    let max_rows = (line_rate_hz / 100.0).min(profile.len() as f64 / 2.0);
+    let f_hz = if let Some((f, _)) = estimate_f(profile, line_rate_hz, 100.0, 5000.0) {
+        f
+    } else if let Some((p_rows, _)) = crate::pwm::robust_period_rows(profile, None, min_rows, max_rows) {
+        line_rate_hz / p_rows
+    } else {
         return (vec![1.0; profile.len()], 0.0);
     };
     // The flicker is multiplicative: row i reads DC * w[i mod p], where w is the
@@ -130,7 +191,30 @@ pub fn apply_plane_gains(
             if s_off + width <= src.len() && d_off + width <= dst.len() {
                 let s_row = &src[s_off..s_off + width];
                 let d_row = &mut dst[d_off..d_off + width];
-                for (s, d) in s_row.iter().zip(d_row.iter_mut()) {
+
+                let chunks = s_row.chunks_exact(16);
+                let rem = chunks.remainder();
+                let d_chunks = d_row.chunks_exact_mut(16);
+                for (sc, dc) in chunks.zip(d_chunks) {
+                    dc[0] = lut[sc[0] as usize];
+                    dc[1] = lut[sc[1] as usize];
+                    dc[2] = lut[sc[2] as usize];
+                    dc[3] = lut[sc[3] as usize];
+                    dc[4] = lut[sc[4] as usize];
+                    dc[5] = lut[sc[5] as usize];
+                    dc[6] = lut[sc[6] as usize];
+                    dc[7] = lut[sc[7] as usize];
+                    dc[8] = lut[sc[8] as usize];
+                    dc[9] = lut[sc[9] as usize];
+                    dc[10] = lut[sc[10] as usize];
+                    dc[11] = lut[sc[11] as usize];
+                    dc[12] = lut[sc[12] as usize];
+                    dc[13] = lut[sc[13] as usize];
+                    dc[14] = lut[sc[14] as usize];
+                    dc[15] = lut[sc[15] as usize];
+                }
+                let rem_offset = s_row.len() - rem.len();
+                for (s, d) in rem.iter().zip(d_row[rem_offset..].iter_mut()) {
                     *d = lut[*s as usize];
                 }
             }

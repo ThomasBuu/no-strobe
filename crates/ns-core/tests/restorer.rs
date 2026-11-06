@@ -109,3 +109,17 @@ fn test_apply_plane_gains() {
         assert_eq!(dst[0 * dst_stride + x], expected);
     }
 }
+
+#[test]
+fn test_temporal_gain_adaptive_preserves_scene_cuts() {
+    // 30 dark frames (mean 0.1), then a sharp cut to bright scene (mean 0.8) for 30 frames
+    let mut means = vec![0.1; 30];
+    means.extend(vec![0.8; 30]);
+
+    let g = ns_core::restorer::temporal_gain_adaptive(&means, 15, 4.0, 0.25);
+
+    // Across the hard boundary (frames 29 and 30), gains should stay close to 1.0
+    // and not bleed brightness across the scene cut.
+    assert!((g[29] - 1.0).abs() < 0.15, "frame 29 gain {}", g[29]);
+    assert!((g[30] - 1.0).abs() < 0.15, "frame 30 gain {}", g[30]);
+}

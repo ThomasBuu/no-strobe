@@ -80,6 +80,12 @@ object NsJni {
         pixelStride: Int,
     ): Double
 
+    private external fun nativeRowGain(
+        profile: DoubleArray,
+        lineRateHz: Double,
+        maxGain: Double,
+    ): DoubleArray?
+
     private external fun nativeApplyPlaneGains(
         srcBuf: java.nio.Buffer,
         dstBuf: java.nio.Buffer,
@@ -137,6 +143,13 @@ object NsJni {
         rowGains,
         temporalGain,
     )
+
+    /** Compute per-row gains to flatten rolling-shutter banding in one frame. */
+    fun rowGain(
+        profile: DoubleArray,
+        lineRateHz: Double,
+        maxGain: Double = 3.0,
+    ): DoubleArray? = nativeRowGain(profile, lineRateHz, maxGain)
 
     /** Test only: the row profile of a PWM light at [fHz], for the simulated-flicker mode. */
     fun syntheticProfile(

@@ -2,7 +2,7 @@
 //! chroma, timing and rotation. Two streaming passes through ffmpeg raw pipes, so memory
 //! stays at a few frames whatever the clip length.
 
-use ns_core::restorer::{row_gain, temporal_gain};
+use ns_core::restorer::{row_gain, temporal_gain_adaptive};
 use std::io::{Read, Write};
 use std::path::Path;
 use std::process::{Command, Stdio};
@@ -70,15 +70,16 @@ fn decoder(input: &Path) -> Result<std::process::Child, String> {
         .map_err(|e| format!("cannot run ffmpeg: {e}"))
 }
 
-fn mean(frame: &[u8]) -> f64 {
-    frame.iter().map(|v| *v as f64).sum::<f64>() / (frame.len() as f64 * 255.0)
+fn mean(frame: &[u8], width: usize, height: usize) -> f64 {
+    let p = ns_core::profile::extract_row_profile(frame, width, height, width, 1, 1, 1);
+    if p.is_empty() {
+        return 0.0;
+    }
+    p.iter().sum::<f64>() / p.len() as f64
 }
 
-fn row_means(frame: &[u8], width: usize) -> Vec<f64> {
-    frame
-        .chunks(width)
-        .map(|r| r.iter().map(|v| *v as f64).sum::<f64>() / (r.len() as f64 * 255.0))
-        .collect()
+fn row_means(frame: &[u8], width: usize, height: usize) -> Vec<f64> {
+    ns_core::profile::extract_row_profile(frame, width, height, width, 1, 1, 1)
 }
 
 /// `line_rate_hz`: sensor row readout rate; 0 only flattens whole-frame pumping.
@@ -91,7 +92,7 @@ pub fn fix(input: &Path, output: &Path, line_rate_hz: f64, log: &mut dyn FnMut(&
     if vk.is_some() {
         log("Vulkan compute acceleration: ENABLED (GPU)");
     } else {
-        log("Vulkan compute acceleration: disabled (falling back to CPU)");
+        log("Vulkan compute acceleration: disabled (falling back to CPU / SIMD)");
     }
 
     // Pass 1: brightness of every frame.
@@ -106,18 +107,18 @@ pub fn fix(input: &Path, output: &Path, line_rate_hz: f64, log: &mut dyn FnMut(&
                     let frame_m = rm.iter().map(|&v| v as f64).sum::<f64>() / p.height as f64;
                     means.push(frame_m);
                 }
-                Err(_) => means.push(mean(&buf)),
+                Err(_) => means.push(mean(&buf, p.width, p.height)),
             }
         } else {
-            means.push(mean(&buf));
+            means.push(mean(&buf, p.width, p.height));
         }
     }
     let _ = dec.wait();
     if means.is_empty() {
         return Err("no frames decoded".into());
     }
-    let gains = temporal_gain(&means, 15, 4.0);
-    log(&format!("pass 1: {} frames", means.len()));
+    let gains = temporal_gain_adaptive(&means, 15, 4.0, 0.25);
+    log(&format!("pass 1: {} frames (adaptive scene-cut preserving temporal filter)", means.len()));
 
     // Pass 2: apply the gains and encode, taking chroma, audio and rotation from the original.
     let mut enc = Command::new("ffmpeg")
@@ -152,10 +153,10 @@ pub fn fix(input: &Path, output: &Path, line_rate_hz: f64, log: &mut dyn FnMut(&
             let row_m: Vec<f64> = if let Some(ref mut vk_ctx) = vk {
                 match vk_ctx.compute_row_means(&buf, p.width, p.height, p.width) {
                     Ok(rm) => rm.into_iter().map(|v| v as f64).collect(),
-                    Err(_) => row_means(&buf, p.width),
+                    Err(_) => row_means(&buf, p.width, p.height),
                 }
             } else {
-                row_means(&buf, p.width)
+                row_means(&buf, p.width, p.height)
             };
 
             let (g, f) = row_gain(&row_m, line_rate_hz, 3.0);
@@ -177,35 +178,45 @@ pub fn fix(input: &Path, output: &Path, line_rate_hz: f64, log: &mut dyn FnMut(&
                     enc_in.write_all(&out_buf).map_err(|e| format!("encoder closed early: {e}"))?;
                 }
                 Err(_) => {
-                    // CPU fallback
-                    if line_rate_hz > 0.0 {
-                        for (r, row) in buf.chunks_mut(p.width).enumerate() {
-                            let gr = row_gains_f32.get(r).copied().unwrap_or(1.0) as f64;
-                            for v in row.iter_mut() {
-                                *v = (*v as f64 * gr).round().clamp(0.0, 255.0) as u8;
-                            }
-                        }
-                    }
-                    for v in buf.iter_mut() {
-                        *v = (*v as f64 * gains[idx]).round().clamp(0.0, 255.0) as u8;
-                    }
-                    enc_in.write_all(&buf).map_err(|e| format!("encoder closed early: {e}"))?;
+                    let row_gains_f64: Option<Vec<f64>> = if line_rate_hz > 0.0 {
+                        Some(row_gains_f32.iter().map(|&g| g as f64).collect())
+                    } else {
+                        None
+                    };
+                    ns_core::restorer::apply_plane_gains(
+                        &buf,
+                        &mut out_buf,
+                        p.width,
+                        p.height,
+                        p.width,
+                        1,
+                        p.width,
+                        1,
+                        row_gains_f64.as_deref(),
+                        gains[idx],
+                    );
+                    enc_in.write_all(&out_buf).map_err(|e| format!("encoder closed early: {e}"))?;
                 }
             }
         } else {
-            // CPU processing
-            if line_rate_hz > 0.0 {
-                for (r, row) in buf.chunks_mut(p.width).enumerate() {
-                    let gr = row_gains_f32.get(r).copied().unwrap_or(1.0) as f64;
-                    for v in row.iter_mut() {
-                        *v = (*v as f64 * gr).round().clamp(0.0, 255.0) as u8;
-                    }
-                }
-            }
-            for v in buf.iter_mut() {
-                *v = (*v as f64 * gains[idx]).round().clamp(0.0, 255.0) as u8;
-            }
-            enc_in.write_all(&buf).map_err(|e| format!("encoder closed early: {e}"))?;
+            let row_gains_f64: Option<Vec<f64>> = if line_rate_hz > 0.0 {
+                Some(row_gains_f32.iter().map(|&g| g as f64).collect())
+            } else {
+                None
+            };
+            ns_core::restorer::apply_plane_gains(
+                &buf,
+                &mut out_buf,
+                p.width,
+                p.height,
+                p.width,
+                1,
+                p.width,
+                1,
+                row_gains_f64.as_deref(),
+                gains[idx],
+            );
+            enc_in.write_all(&out_buf).map_err(|e| format!("encoder closed early: {e}"))?;
         }
         idx += 1;
     }

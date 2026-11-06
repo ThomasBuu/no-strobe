@@ -436,3 +436,26 @@ pub extern "system" fn Java_dev_nostrobe_NsJni_nativeApplyPlaneGains(
         temporal_gain,
     );
 }
+
+/// Compute per-row gains to flatten rolling-shutter banding in one frame.
+#[no_mangle]
+pub extern "system" fn Java_dev_nostrobe_NsJni_nativeRowGain(
+    mut env: JNIEnv,
+    _class: JClass,
+    profile: JDoubleArray,
+    line_rate_hz: jdouble,
+    max_gain: jdouble,
+) -> jdoubleArray {
+    let values: Vec<f64> = match unsafe { env.get_array_elements(&profile, ReleaseMode::NoCopyBack) } {
+        Ok(arr) => arr.iter().copied().collect(),
+        Err(_) => return std::ptr::null_mut(),
+    };
+    let (gains, _) = ns_core::restorer::row_gain(&values, line_rate_hz, max_gain);
+    match env.new_double_array(gains.len() as jsize) {
+        Ok(arr) => {
+            let _ = env.set_double_array_region(&arr, 0, &gains);
+            arr.into_raw()
+        }
+        Err(_) => std::ptr::null_mut(),
+    }
+}
