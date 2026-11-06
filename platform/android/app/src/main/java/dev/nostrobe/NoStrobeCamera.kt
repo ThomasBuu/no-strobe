@@ -157,6 +157,8 @@ class NoStrobeCamera(
     private var budgetUsIso = 0.0
     private var latestAutoBudget = 0.0
     private var autoWait = 0
+    /** The auto-exposure settle window is over: the gate must not re-arm, even with no budget. */
+    private var autoSettled = false
     private var isoMin = 100.0
     private var isoMax = 6400.0
     private val resultCallback = object : CameraCaptureSession.CaptureCallback() {
@@ -679,6 +681,10 @@ class NoStrobeCamera(
         w.write("%.0f,%d".format(e, image.timestamp))
         for (v in prof) w.write(",%.5f".format(java.util.Locale.US, v))
         w.write("\n")
+        // Flush every line: a 1080-row line is about 7.5 kB, so the FileWriter's buffer holds
+        // barely one. Stopping the app (am force-stop) then loses everything not written to disk,
+        // and profiles.csv reads as 0 bytes.
+        w.flush()
         dumpFrames += 1
         if (dumpFrames >= 24) {
             dumpIndex += 1
@@ -705,10 +711,12 @@ class NoStrobeCamera(
             if (SystemClock.elapsedRealtime() < restUntilMs) return  // auto-exposure rest
             // Let the camera's auto-exposure settle first so the brightness budget is known
             // (about one second at 60 fps; the analysis has room for that).
-            if (requestedExposureNs == 0L && budgetUsIso == 0.0) {
+            if (!autoSettled && requestedExposureNs == 0L && budgetUsIso == 0.0) {
                 autoWait += 1
                 if (autoWait < 60) return
                 budgetUsIso = latestAutoBudget  // AE never reported CONVERGED: use what we have
+                autoSettled = true  // with a zero budget the old test never closed: the dump
+                // (and the controller) were never reached, and the app analysed nothing.
             }
             // The controller is created once the brightness budget is known: the frame rate and
             // the shutter it aims for depend on it.
@@ -855,6 +863,7 @@ class NoStrobeCamera(
         budgetUsIso = 0.0
         latestAutoBudget = 0.0
         autoWait = 0
+        autoSettled = false
         staleFrames = 0
         last = null
         val d = device
@@ -905,6 +914,7 @@ class NoStrobeCamera(
         budgetUsIso = 0.0
         latestAutoBudget = 0.0
         autoWait = 0
+        autoSettled = false
         probeSinceMs = 0L
         restUntilMs = 0L
         mismatchRun = 0
@@ -913,9 +923,9 @@ class NoStrobeCamera(
 
     private companion object {
         const val TAG = "nostrobe"
-        const val PROBE_MS = 30_000L
+        const val PROBE_MS = 60_000L
         /** Longer while the controller reports a real flicker it is still homing in on. */
-        const val PROBE_SIGNAL_MS = 40_000L
+        const val PROBE_SIGNAL_MS = 90_000L
         const val REST_MS = 12_000L
         const val FOCUS_HOLD_MS = 3_000L
         const val SIM_LINE_RATE_HZ = 40_000.0
