@@ -1,0 +1,12 @@
+[package]
+name = "ns-post"
+version = "0.1.0"
+edition = "2021"
+description = "Desktop post-processing of no-strobe clips: fix a file, or serve /fix for the phone to offload to"
+
+[[bin]]
+name = "no-strobe-post"
+path = "src/main.rs"
+
+[dependencies]
+ns-core = { path = "../ns-core" }

@@ -302,3 +302,30 @@ readable when the exposure window is shorter than one flicker cycle, so the test
   before lock.
 - The app reduces flicker **in the video**, not in the room. Warn users about photosensitive
   epilepsy.
+
+## Desktop post-processing and offload
+
+`no-strobe-post` (crate `ns-post`, needs `ffmpeg` and `ffprobe` in PATH) fixes a clip on a
+computer, streaming the frames through ffmpeg so memory stays small. It de-flickers the luma
+with the restorer, and keeps the original chroma, audio, frame timing and rotation.
+
+```sh
+cargo build --release -p ns-post
+target/release/no-strobe-post fix clip.mp4 [--line-rate HZ] [-o clip-fixed.mp4]
+```
+
+For the phone to offload a clip to the computer, run the server:
+
+```sh
+export NO_STROBE_TOKEN=some-secret
+target/release/no-strobe-post serve --listen 0.0.0.0:8765   # --token is required off localhost
+```
+
+`POST /fix?line_rate=<hz>` with the mp4 as body (and `Authorization: Bearer <token>`) answers
+with the fixed mp4; `GET /health` answers `ok`. One clip is processed at a time. The server
+runs ffmpeg on what it receives and the token travels in clear text (plain HTTP): use it on a
+trusted network, or behind a VPN/tunnel such as Tailscale. `tools/postprocess.sh` remains as
+a script-only alternative.
+
+Limit: the gain is computed from each frame's own brightness, so a genuine fade or an
+auto-exposure change in the clip is flattened too.

@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/ns-core", "crates/ns-ffi"]
+members = ["crates/ns-core", "crates/ns-ffi", "crates/ns-post"]
 
 [profile.release]
 lto = true
