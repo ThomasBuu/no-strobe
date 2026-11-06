@@ -56,6 +56,7 @@ class MainActivity : AppCompatActivity() {
     private var lastClip: File? = null
     private var lastRowRate = 0.0
     private var recFps = 30
+    private var hsFps = 0  // > 0 while recording at a high-speed rate chosen from the locked frequency
     // The flicker lock in force when the recording starts: the camera is reopened with the
     // recorder surface and must start on it, not search (probing exposures ruin a clip).
     private var carryExposureUs = 0.0
@@ -220,6 +221,7 @@ class MainActivity : AppCompatActivity() {
             // Pixel 11 Pro Fold wrote pure noise into the clip; the lock is applied open loop.
             dumpProfiles = intent.getBooleanExtra("dump_profiles", false),
             outDir = externalCacheDir ?: cacheDir,
+            highSpeedFps = if (recorder != null) hsFps else 0,
             startLevel = if (recorder != null) 2 else intent.getIntExtra("session_level", 0),
             recordFps = recFps,
             onReady = {
@@ -241,6 +243,12 @@ class MainActivity : AppCompatActivity() {
             runOnUiThread { status.text = s }
         }
         camera?.meta = pendingMeta
+        if (intent.getBooleanExtra("luma_csv", false) && pendingMeta == null) {
+            // Debug: one line per analysed frame (timestamp, exposure, ISO, luma...) to luma.csv.
+            val w = java.io.FileWriter(File(externalCacheDir ?: cacheDir, "luma.csv"))
+            w.write("timestamp_ns,exposure_ns,iso,luma,state,freq_hz,stale\n")
+            camera?.meta = w
+        }
         pendingMeta = null
         camera?.start()
     }
@@ -364,6 +372,27 @@ class MainActivity : AppCompatActivity() {
         return if (front) (sensor + screen) % 360 else (sensor - screen + 360) % 360
     }
 
+    /**
+     * A constrained high-speed mode this camera lists whose frame time still holds an exposure
+     * of one flicker period (rate <= 0.9 x f), the fastest and then the largest size up to
+     * 1080p: (fps, width, height), or null (then the normal 30/60 fps recording).
+     */
+    private fun pickHighSpeed(hz: Double): Triple<Int, Int, Int>? {
+        val option = lensOptions.getOrNull(lensIndex) ?: return null
+        val manager = getSystemService(CAMERA_SERVICE) as CameraManager
+        val map = manager.getCameraCharacteristics(option.logicalId)
+            .get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP) ?: return null
+        val ranges = try { map.highSpeedVideoFpsRanges } catch (_: Exception) { return null }
+        val fixed = ranges.filter { it.lower == it.upper && it.upper >= 100 && it.upper <= 0.9 * hz }
+            .sortedByDescending { it.upper }
+        for (r in fixed) {
+            val size = map.getHighSpeedVideoSizesFor(r)
+                .filter { it.height <= 1080 }.maxByOrNull { it.width.toLong() * it.height } ?: continue
+            return Triple(r.upper, size.width, size.height)
+        }
+        return null
+    }
+
     private fun selectLens(index: Int) {
         if (index == lensIndex || index !in lensOptions.indices) return
         lensIndex = index
@@ -429,6 +458,7 @@ class MainActivity : AppCompatActivity() {
                 android.util.Log.w("nostrobe", "recorder stopped without data: ${e.message}")
             }
             recorder?.release(); recorder = null
+            hsFps = 0
             recordButton.isSelected = false
             requestedOrientation = android.content.pm.ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
             finishClip()
@@ -439,14 +469,16 @@ class MainActivity : AppCompatActivity() {
         // The lock in force now, with the frame rate it was found at (a dim scene runs at a lower
         // rate): the recording must use that rate, or the exposure would not fit in the frame.
         val carriedLock = camera?.carryLock() ?: Triple(0.0, 0.0, 0.0)
+        val hs = if (carriedLock.second > 0.0) pickHighSpeed(carriedLock.second) else null
+        hsFps = hs?.first ?: 0
         // 1080p keeps the encoder and the lens stream manageable; QUALITY_HIGH can be 4K.
         val p = pickProfile()
         val r = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) MediaRecorder(this) else MediaRecorder()
         // The call order matters: the source first, then the format, then the encoders.
         // Video only for now: audio would need the RECORD_AUDIO permission.
-        val withAudio = micOn && ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) ==
+        val withAudio = hs == null && micOn && ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) ==
             PackageManager.PERMISSION_GRANTED
-        if (micOn && !withAudio) {
+        if (hs == null && micOn && !withAudio) {
             // Ask once; this clip is recorded without sound, the next one will have it.
             ActivityCompat.requestPermissions(this, arrayOf(Manifest.permission.RECORD_AUDIO), 2)
             Toast.makeText(this, "Allow the microphone to record sound.", Toast.LENGTH_SHORT).show()
@@ -463,11 +495,21 @@ class MainActivity : AppCompatActivity() {
             ?: (p?.videoFrameRate ?: 30)
         val vw = p?.videoFrameWidth ?: 1280
         val vh = p?.videoFrameHeight ?: 720
-        r.setVideoEncodingBitRate(minOf(rate, MAX_VIDEO_BITRATE))
+        r.setVideoEncodingBitRate(if (hs != null) 60_000_000 else minOf(rate, MAX_VIDEO_BITRATE))
         android.util.Log.i("nostrobe", "recorder: profile %d bps -> asked %d bps, %dx%d @ %d".format(rate, minOf(rate, MAX_VIDEO_BITRATE), vw, vh, fps))
-        r.setVideoFrameRate(fps)
-        recFps = fps
-        r.setVideoSize(vw, vh)
+        if (hs != null) {
+            // High speed: the rate and size the camera lists, the capture rate = the frame rate
+            // (real-time video, not slow motion), and a rate that fits a 240 fps stream.
+            r.setVideoFrameRate(hs.first)
+            r.setCaptureRate(hs.first.toDouble())
+            recFps = hs.first
+            r.setVideoSize(hs.second, hs.third)
+            android.util.Log.i("nostrobe", "high speed chosen: ${hs.first} fps ${hs.second}x${hs.third} for %.1f Hz".format(carriedLock.second))
+        } else {
+            r.setVideoFrameRate(fps)
+            recFps = fps
+            r.setVideoSize(vw, vh)
+        }
         r.setVideoEncoder(MediaRecorder.VideoEncoder.H264)
         if (withAudio) {
             r.setAudioEncoder(MediaRecorder.AudioEncoder.AAC)

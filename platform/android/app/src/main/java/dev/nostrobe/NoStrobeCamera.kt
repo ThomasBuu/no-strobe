@@ -2,6 +2,7 @@ package dev.nostrobe
 
 import android.graphics.ImageFormat
 import android.hardware.camera2.CameraCaptureSession
+import android.hardware.camera2.CameraConstrainedHighSpeedCaptureSession
 import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CameraDevice
 import android.hardware.camera2.CameraManager
@@ -52,6 +53,8 @@ class NoStrobeCamera(
     private val forceAutoOnly: Boolean = false,
     /** Debug: start the session ladder at this level (2 = no analysis stream). */
     private val startLevel: Int = 0,
+    /** > 0: constrained high-speed recording at this rate, recorder surface only (no preview). */
+    private val highSpeedFps: Int = 0,
     /** Debug: sweep fixed exposures and write the row profiles of each to profiles.csv (real data). */
     private val dumpProfiles: Boolean = false,
     private val outDir: java.io.File? = null,
@@ -97,6 +100,7 @@ class NoStrobeCamera(
     // noisy clip). After PROBE_MS without a lock the camera goes back to auto-exposure for
     // REST_MS, then probes again (the lights may have changed).
     private var surfaceList: List<Surface> = emptyList()
+    private var fallbackSurfaces: List<Surface> = emptyList()
     /** The lock in force right now (0 when searching), to carry over when the camera is reopened. */
     @Volatile private var lockExposureUs = 0.0
     @Volatile private var lockHz = 0.0
@@ -141,6 +145,8 @@ class NoStrobeCamera(
                 w.write(String.format(Locale.US, "%d,%d,%d,%.4f,%d,%.1f,%d\n",
                     ts, expNs, c?.iso?.toInt() ?: 0, luma, c?.state ?: -1, hz, if (stale) 1 else 0))
             } catch (_: java.io.IOException) {}
+            // Flush regularly: a debug log must survive the app being stopped.
+            if (!stale && recFrames % 20 == 0) try { w.flush() } catch (_: java.io.IOException) {}
         }
     }
 
@@ -280,8 +286,13 @@ class NoStrobeCamera(
         reader = r
         analysisSurface = r.surface
 
-        val surfaces = listOf(previewSurface, r.surface) +
+        val normalSurfaces = listOf(previewSurface, r.surface) +
             (recorder?.surface?.let { listOf(it) } ?: emptyList())
+        // High-speed: the session takes one or two surfaces and no analysis stream; we give it
+        // the recorder only. The normal set is kept for the fallback when the device refuses.
+        val hsSurfaces = recorder?.surface?.let { listOf(it) }
+        val surfaces = if (highSpeedFps > 0 && hsSurfaces != null) hsSurfaces else normalSurfaces
+        fallbackSurfaces = normalSurfaces
         surfaceList = surfaces
 
         manager.openCamera(cameraId, object : CameraDevice.StateCallback() {
@@ -447,8 +458,77 @@ class NoStrobeCamera(
      *   2  no analysis stream: preview + recorder only, no flicker sync (post-processing)
      *   3  preview only: the clip cannot be recorded on this device
      */
+    /**
+     * Constrained high-speed recording (e.g. 120/240 frames per second), chosen by the app when
+     * the locked flicker is fast enough (frame time >= the exposure k/f with k = 1). There is no
+     * analysis stream and no preview in such a session: the lock found before is applied open
+     * loop. If the device refuses it, fall back to the normal preview + recorder session.
+     */
+    private fun createHighSpeedSession(d: CameraDevice, surfaces: List<Surface>) {
+        autoOnly = true
+        val cb = object : CameraCaptureSession.StateCallback() {
+            override fun onConfigured(s: CameraCaptureSession) {
+                session = s
+                val hs = s as? CameraConstrainedHighSpeedCaptureSession
+                if (hs == null) { createSession(d, fallbackSurfaces, 2); return }
+                try {
+                    val b = d.createCaptureRequest(CameraDevice.TEMPLATE_RECORD)
+                    for (t in surfaces) b.addTarget(t)
+                    b.set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, android.util.Range(highSpeedFps, highSpeedFps))
+                    builder = b
+                    hs.setRepeatingBurst(hs.createHighSpeedRequestList(b.build()), resultCallback, handler)
+                    Log.i(TAG, "high-speed session at $highSpeedFps fps")
+                    onReady()
+                    handler?.postDelayed({ applySeededHighSpeed(hs) }, SEED_METER_MS)
+                } catch (e: Exception) {
+                    Log.w(TAG, "high-speed start failed (${e.message}): normal session")
+                    createSession(d, fallbackSurfaces, 2)
+                }
+            }
+
+            override fun onConfigureFailed(s: CameraCaptureSession) {
+                Log.w(TAG, "high-speed session refused at $highSpeedFps fps: normal session")
+                try { createSession(d, fallbackSurfaces, 2) } catch (e: Exception) {
+                    Log.w(TAG, "fallback failed: ${e.message}")
+                }
+            }
+        }
+        try {
+            d.createConstrainedHighSpeedCaptureSession(surfaces, cb, handler)
+        } catch (e: Exception) {
+            Log.w(TAG, "high-speed not available (${e.message}): normal session")
+            createSession(d, fallbackSurfaces, 2)
+        }
+    }
+
+    /** Exposure for the high-speed rate: the longest multiple of the period that fits the frame. */
+    private fun applySeededHighSpeed(hs: CameraConstrainedHighSpeedCaptureSession) {
+        val b = builder ?: return
+        if (stopped || seedHz <= 0.0) return
+        val frameUs = 1e6 / highSpeedFps
+        val k = Math.floor(0.9 * frameUs * seedHz / 1e6).coerceAtLeast(1.0)
+        val e = k * 1e6 / seedHz
+        val budget = if (budgetUsIso > 0.0) budgetUsIso else latestAutoBudget
+        val iso = if (budget > 0.0) (budget * Math.pow(2.0, evBias.toDouble()) / e).coerceIn(isoMin, isoMax) else isoMin
+        val cmd = NsCommand(e, highSpeedFps.toDouble(), iso, NsJni.MODE_PWM, NsJni.STATE_LOCKED, 1e6 / seedHz, 0.8, 0.0)
+        Camera2Sync.apply(b, cmd)
+        b.set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, android.util.Range(highSpeedFps, highSpeedFps))
+        requestedExposureNs = (e * 1000.0).toLong()
+        try {
+            hs.setRepeatingBurst(hs.createHighSpeedRequestList(b.build()), resultCallback, handler)
+            Log.i(TAG, "high speed %d fps: %.0f us (k=%.0f of %.1f Hz) ISO %.0f".format(highSpeedFps, e, k, seedHz, iso))
+            onStatus(cmd)
+        } catch (ex: Exception) {
+            Log.w(TAG, "high-speed exposure not applied: ${ex.message}")
+        }
+    }
+
     private fun createSession(d: CameraDevice, all: List<Surface>, level: Int = 0) {
         if (stopped) return
+        if (highSpeedFps > 0 && all === surfaceList && recorder != null) {
+            createHighSpeedSession(d, all)
+            return
+        }
         val pin = if (level == 0) physicalId else null
         activePhysicalId = pin
         val surfaces = when {
