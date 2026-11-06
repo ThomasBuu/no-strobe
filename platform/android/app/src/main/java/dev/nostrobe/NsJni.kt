@@ -5,14 +5,17 @@ package dev.nostrobe
  *
  * Output slots from nativeOnFrame:
  * 0 exposure_us, 1 fps, 2 iso, 3 mode, 4 state, 5 period_us, 6 confidence, 7 drift_us_per_frame.
+ *
+ * The controller classes are nested inside this object and the external functions are
+ * private. Kotlin name-mangles `internal` members with the module name (`nativeCreatePwm$app`),
+ * and the JNI symbol `Java_dev_nostrobe_NsJni_nativeCreatePwm` then never resolves.
  */
 object NsJni {
     init {
         System.loadLibrary("ns_ffi")
     }
 
-    // internal, not private: SyncController / PwmSyncController are top-level in this file.
-    internal external fun nativeCreate(
+    private external fun nativeCreate(
         minExposureUs: Double,
         maxExposureUs: Double,
         sustainUs: Double,
@@ -21,11 +24,11 @@ object NsJni {
         maxIso: Double,
     ): Long
 
-    internal external fun nativeOnFrame(handle: Long, tUs: Double, luminance: Double, out: DoubleArray)
+    private external fun nativeOnFrame(handle: Long, tUs: Double, luminance: Double, out: DoubleArray)
 
-    internal external fun nativeDestroy(handle: Long)
+    private external fun nativeDestroy(handle: Long)
 
-    internal external fun nativeCreatePwm(
+    private external fun nativeCreatePwm(
         minExposureUs: Double,
         maxExposureUs: Double,
         sustainUs: Double,
@@ -35,9 +38,9 @@ object NsJni {
         lineRateHz: Double,
     ): Long
 
-    internal external fun nativeOnProfile(handle: Long, profile: DoubleArray, out: DoubleArray)
+    private external fun nativeOnProfile(handle: Long, profile: DoubleArray, out: DoubleArray)
 
-    internal external fun nativeDestroyPwm(handle: Long)
+    private external fun nativeDestroyPwm(handle: Long)
 
     const val MODE_INTEGRATE = 0
     const val MODE_GAP = 1
@@ -75,71 +78,71 @@ object NsJni {
         )
         return PwmSyncController(handle)
     }
+
+    data class CameraLimits(
+        val minExposureUs: Double,
+        val maxExposureUs: Double,
+        val sustainUs: Double,
+        val supportedFps: DoubleArray,
+        val minIso: Double,
+        val maxIso: Double,
+    )
+
+    data class NsCommand(
+        val exposureUs: Double,
+        val fps: Double,
+        val iso: Double,
+        val mode: Int,
+        val state: Int,
+        val periodUs: Double,
+        val confidence: Double,
+        val driftUsPerFrame: Double,
+    )
+
+    class SyncController(private val handle: Long) {
+        private val out = DoubleArray(8)
+
+        /** Feed one frame (readout start in microseconds, mean luma 0..1), get the shutter command. */
+        fun onFrame(tUs: Double, luminance: Double): NsCommand {
+            nativeOnFrame(handle, tUs, luminance, out)
+            return command(out)
+        }
+
+        fun close() {
+            nativeDestroy(handle)
+        }
+    }
+
+    /** PWM (LED flicker) controller: feed the per-row luma profile of each frame. */
+    class PwmSyncController(private val handle: Long) {
+        private val out = DoubleArray(8)
+
+        /** Feed one frame's vertical luminance profile (per-row mean luma, 0..1). */
+        fun onProfile(profile: DoubleArray): NsCommand {
+            nativeOnProfile(handle, profile, out)
+            return command(out)
+        }
+
+        fun close() {
+            nativeDestroyPwm(handle)
+        }
+    }
+
+    private fun command(out: DoubleArray) = NsCommand(
+        exposureUs = out[0],
+        fps = out[1],
+        iso = out[2],
+        mode = out[3].toInt(),
+        state = out[4].toInt(),
+        periodUs = out[5],
+        confidence = out[6],
+        driftUsPerFrame = out[7],
+    )
 }
 
-data class CameraLimits(
-    val minExposureUs: Double,
-    val maxExposureUs: Double,
-    val sustainUs: Double,
-    val supportedFps: DoubleArray,
-    val minIso: Double,
-    val maxIso: Double,
-)
-
-data class NsCommand(
-    val exposureUs: Double,
-    val fps: Double,
-    val iso: Double,
-    val mode: Int,
-    val state: Int,
-    val periodUs: Double,
-    val confidence: Double,
-    val driftUsPerFrame: Double,
-)
-
-class SyncController(private val handle: Long) {
-    private val out = DoubleArray(8)
-
-    /** Feed one frame (readout start in microseconds, mean luma 0..1), get the shutter command. */
-    fun onFrame(tUs: Double, luminance: Double): NsCommand {
-        NsJni.nativeOnFrame(handle, tUs, luminance, out)
-        return NsCommand(
-            exposureUs = out[0],
-            fps = out[1],
-            iso = out[2],
-            mode = out[3].toInt(),
-            state = out[4].toInt(),
-            periodUs = out[5],
-            confidence = out[6],
-            driftUsPerFrame = out[7],
-        )
-    }
-
-    fun close() {
-        NsJni.nativeDestroy(handle)
-    }
-}
-
-/** PWM (LED flicker) controller: feed the per-row luma profile of each frame. */
-class PwmSyncController(private val handle: Long) {
-    private val out = DoubleArray(8)
-
-    /** Feed one frame's vertical luminance profile (per-row mean luma, 0..1). */
-    fun onProfile(profile: DoubleArray): NsCommand {
-        NsJni.nativeOnProfile(handle, profile, out)
-        return NsCommand(
-            exposureUs = out[0],
-            fps = out[1],
-            iso = out[2],
-            mode = out[3].toInt(),
-            state = out[4].toInt(),
-            periodUs = out[5],
-            confidence = out[6],
-            driftUsPerFrame = out[7],
-        )
-    }
-
-    fun close() {
-        NsJni.nativeDestroyPwm(handle)
-    }
-}
+// Nested inside NsJni so the external functions stay private (no JNI name mangling).
+// The aliases keep the call sites unchanged.
+typealias CameraLimits = NsJni.CameraLimits
+typealias NsCommand = NsJni.NsCommand
+typealias SyncController = NsJni.SyncController
+typealias PwmSyncController = NsJni.PwmSyncController

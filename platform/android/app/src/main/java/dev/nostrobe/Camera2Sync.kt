@@ -19,22 +19,32 @@ object Camera2Sync {
      * devices without it get 0, which makes the solver treat the readout as instantaneous.
      */
     fun limitsFromCharacteristics(chars: CameraCharacteristics): CameraLimits {
-        val exposureRange = chars.get(CameraCharacteristics.SENSOR_INFO_EXPOSURE_TIME)
+        val exposureRange: Range<Long> = chars.get(CameraCharacteristics.SENSOR_INFO_EXPOSURE_TIME_RANGE)
             ?: return CameraLimits(100.0, 30000.0, 20000.0, doubleArrayOf(30.0), 100.0, 6400.0)
-        val sensitivity = chars.get(CameraCharacteristics.SENSOR_INFO_SENSITIVITY_RANGE)
-        val fpsRanges = chars.get(CameraCharacteristics.CONTROL_AE_TARGET_FPS_RANGE)
-        val sustain = chars.get(CameraCharacteristics.SENSOR_INFO_ROLLING_SHUTTER_SUSTAIN_DURATION)
+        val sensitivity: Range<Int>? = chars.get(CameraCharacteristics.SENSOR_INFO_SENSITIVITY_RANGE)
+        // The list of supported fps, not the current AE target.
+        val fpsRanges: Array<Range<Int>>? =
+            chars.get(CameraCharacteristics.CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES)
+        // API 31+ key. The symbol is not in android.jar at compileSdk 34, so the key is
+        // built from its name. Devices that do not define the tag throw
+        // IllegalArgumentException from CameraCharacteristics.get, so the read is guarded;
+        // they get sustain = 0 and the PWM path hill-climbs.
+        val sustainKey = CameraCharacteristics.Key(
+            "android.sensor.info.rolling_shutter_sustain_duration",
+            java.lang.Long::class.java,
+        )
+        val sustain = runCatching { chars.get(sustainKey) }.getOrNull()
 
-        val fps = fpsRanges?.map { it.toDouble() }?.toDoubleArray()
+        val fps = fpsRanges?.map { it.upper.toDouble() }?.toDoubleArray()
             ?: doubleArrayOf(30.0)
 
         return CameraLimits(
-            minExposureUs = exposureRange.getLower() / NS_PER_US.toDouble(),
-            maxExposureUs = exposureRange.getUpper() / NS_PER_US.toDouble(),
-            sustainUs = (sustain?.getUpper() ?: 0L) / NS_PER_US.toDouble(),
+            minExposureUs = exposureRange.lower / NS_PER_US.toDouble(),
+            maxExposureUs = exposureRange.upper / NS_PER_US.toDouble(),
+            sustainUs = (sustain?.toLong() ?: 0L) / NS_PER_US.toDouble(),
             supportedFps = fps,
-            minIso = (sensitivity?.getLower() ?: 100).toDouble(),
-            maxIso = (sensitivity?.getUpper() ?: 6400).toDouble(),
+            minIso = (sensitivity?.lower ?: 100).toDouble(),
+            maxIso = (sensitivity?.upper ?: 6400).toDouble(),
         )
     }
 

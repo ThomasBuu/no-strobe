@@ -131,7 +131,7 @@ impl PwmController {
         // No row readout rate (iOS): hill-climb the banding metric. Its minima sit
         // at exposures equal to k / f, so f is not needed to find them. Start at
         // the geometric centre of the range so the climb can move both ways.
-        self.hill_base = (self.limits.min_exposure_us * self.limits.max_exposure_us).sqrt();
+        self.hill_base = (self.limits.min_exposure_us * self.exposure_cap()).sqrt();
         self.hill_exposure = self.hill_base;
         self.hill_step = 1.25;
         self.probe = 0;
@@ -156,7 +156,7 @@ impl PwmController {
         if self.probe < 3 {
             // Probe the centre, then one step up, then one step down.
             let next = if self.probe == 1 {
-                (self.hill_base * self.hill_step).min(self.limits.max_exposure_us)
+                (self.hill_base * self.hill_step).min(self.exposure_cap())
             } else {
                 (self.hill_base / self.hill_step).max(self.limits.min_exposure_us)
             };
@@ -180,7 +180,7 @@ impl PwmController {
         if best_idx == 0 {
             self.hill_step = 1.0 + (self.hill_step - 1.0) * 0.6;
         }
-        self.hill_base = best.clamp(self.limits.min_exposure_us, self.limits.max_exposure_us);
+        self.hill_base = best.clamp(self.limits.min_exposure_us, self.exposure_cap());
         self.hill_exposure = self.hill_base;
         if self.line_rate_hz == 0.0 && self.hill_step < SWEEP_COARSE && self.f_hz == 0.0 {
             // Local banding minimum: this exposure is k / f for some k. The climb
@@ -281,6 +281,15 @@ impl PwmController {
         }
         let k = self.profiles.len().max(1) as f64;
         out.iter().map(|v| v / k).collect()
+    }
+
+    /// Longest exposure the frame can hold: a sensor accepts exposures far longer than one
+    /// frame, but then stretches the frame duration and the frame rate collapses.
+    fn exposure_cap(&self) -> f64 {
+        let frame_us = 1e6 / self.fps;
+        self.limits
+            .max_exposure_us
+            .min((frame_us - self.limits.sustain_us).max(self.limits.min_exposure_us))
     }
 
     fn emit(&mut self, exposure_us: f64, state: State, confidence: f64) -> crate::controller::Command {
