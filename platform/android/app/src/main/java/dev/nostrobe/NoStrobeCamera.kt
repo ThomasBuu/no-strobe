@@ -5,7 +5,10 @@ import android.hardware.camera2.CameraCaptureSession
 import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CameraDevice
 import android.hardware.camera2.CameraManager
+import android.graphics.Rect
+import android.hardware.camera2.CameraMetadata
 import android.hardware.camera2.CaptureRequest
+import android.hardware.camera2.params.MeteringRectangle
 import android.hardware.camera2.CaptureResult
 import android.hardware.camera2.TotalCaptureResult
 import android.hardware.camera2.params.OutputConfiguration
@@ -63,6 +66,7 @@ class NoStrobeCamera(
     private var latestResultExposureNs = 0L
     private val resultExposure = HashMap<Long, Long>()
     private var staleFrames = 0
+    private var lastAfState: Int? = null
     @Volatile private var stopped = false
 
     // No flicker found: do not leave the sensor on short exposures and a maxed ISO (a dark,
@@ -117,6 +121,15 @@ class NoStrobeCamera(
             request: CaptureRequest,
             result: TotalCaptureResult,
         ) {
+            val af = result.get(CaptureResult.CONTROL_AF_STATE)
+            if (af != lastAfState) {
+                lastAfState = af
+                when (af) {
+                    CaptureResult.CONTROL_AF_STATE_FOCUSED_LOCKED -> Log.i(TAG, "focus: locked")
+                    CaptureResult.CONTROL_AF_STATE_NOT_FOCUSED_LOCKED -> Log.i(TAG, "focus: could not lock")
+                    else -> Log.d(TAG, "af state $af")
+                }
+            }
             val ts = result.get(CaptureResult.SENSOR_TIMESTAMP) ?: return
             val e = result.get(CaptureResult.SENSOR_EXPOSURE_TIME) ?: return
             if (requestedExposureNs == 0L) {
@@ -222,6 +235,68 @@ class NoStrobeCamera(
     private fun applyZoom(b: CaptureRequest.Builder) {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
             b.set(CaptureRequest.CONTROL_ZOOM_RATIO, zoomRatio)
+        }
+    }
+
+    /**
+     * Tap to focus at a point of the preview (0..1 in the upright view). The point is turned
+     * into sensor coordinates (rotation, then the zoom crop), autofocus is triggered once
+     * and then held; continuous autofocus resumes after FOCUS_HOLD_MS.
+     */
+    fun focusAt(nx: Float, ny: Float) {
+        val b = builder ?: return
+        val sess = session ?: return
+        val chars = manager.getCameraCharacteristics(cameraId)
+        val active = chars.get(CameraCharacteristics.SENSOR_INFO_ACTIVE_ARRAY_SIZE) ?: return
+        val orientation = chars.get(CameraCharacteristics.SENSOR_ORIENTATION) ?: 90
+        val (sx, sy) = when (orientation) {
+            90 -> ny to (1f - nx)
+            270 -> (1f - ny) to nx
+            180 -> (1f - nx) to (1f - ny)
+            else -> nx to ny
+        }
+        // What the user sees is the zoom crop, centred on the active array.
+        val z = zoomRatio.coerceAtLeast(0.1f)
+        val cw = active.width() / z
+        val ch = active.height() / z
+        val px = active.exactCenterX() - cw / 2f + sx * cw
+        val py = active.exactCenterY() - ch / 2f + sy * ch
+        val half = (minOf(active.width(), active.height()) / 10f).toInt()
+        val rect = Rect(
+            (px - half).toInt().coerceIn(active.left, active.right - 1),
+            (py - half).toInt().coerceIn(active.top, active.bottom - 1),
+            (px + half).toInt().coerceIn(active.left + 1, active.right),
+            (py + half).toInt().coerceIn(active.top + 1, active.bottom),
+        )
+        b.set(CaptureRequest.CONTROL_AF_REGIONS, arrayOf(MeteringRectangle(rect, MeteringRectangle.METERING_WEIGHT_MAX - 1)))
+        b.set(CaptureRequest.CONTROL_AF_MODE, CameraMetadata.CONTROL_AF_MODE_AUTO)
+        b.set(CaptureRequest.CONTROL_AF_TRIGGER, CameraMetadata.CONTROL_AF_TRIGGER_START)
+        try {
+            sess.capture(b.build(), focusCallback, handler)
+            // The trigger is one-shot: the held request must not carry it again.
+            b.set(CaptureRequest.CONTROL_AF_TRIGGER, CameraMetadata.CONTROL_AF_TRIGGER_IDLE)
+            sess.setRepeatingRequest(b.build(), resultCallback, handler)
+            handler?.removeCallbacks(resumeContinuousFocus)
+            handler?.postDelayed(resumeContinuousFocus, FOCUS_HOLD_MS)
+        } catch (e: Exception) {
+            Log.w(TAG, "focus not applied: ${e.message}")
+        }
+    }
+
+    private val resumeContinuousFocus = Runnable {
+        val b = builder ?: return@Runnable
+        b.set(CaptureRequest.CONTROL_AF_MODE, CameraMetadata.CONTROL_AF_MODE_CONTINUOUS_VIDEO)
+        b.set(CaptureRequest.CONTROL_AF_REGIONS, null)
+        try { session?.setRepeatingRequest(b.build(), resultCallback, handler) } catch (_: Exception) {}
+    }
+
+    private val focusCallback = object : CameraCaptureSession.CaptureCallback() {
+        override fun onCaptureCompleted(s: CameraCaptureSession, r: CaptureRequest, result: TotalCaptureResult) {
+            when (result.get(CaptureResult.CONTROL_AF_STATE)) {
+                CaptureResult.CONTROL_AF_STATE_FOCUSED_LOCKED -> Log.i(TAG, "focus: locked")
+                CaptureResult.CONTROL_AF_STATE_NOT_FOCUSED_LOCKED -> Log.i(TAG, "focus: could not lock")
+                else -> {}
+            }
         }
     }
 
@@ -436,5 +511,6 @@ class NoStrobeCamera(
         const val TAG = "nostrobe"
         const val PROBE_MS = 6_000L
         const val REST_MS = 12_000L
+        const val FOCUS_HOLD_MS = 3_000L
     }
 }

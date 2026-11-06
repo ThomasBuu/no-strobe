@@ -4,11 +4,24 @@
     android:layout_height="match_parent"
     android:orientation="vertical">
 
-    <SurfaceView
-        android:id="@+id/preview"
+    <FrameLayout
         android:layout_width="match_parent"
         android:layout_height="0dp"
-        android:layout_weight="1" />
+        android:layout_weight="1">
+
+        <SurfaceView
+            android:id="@+id/preview"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent" />
+
+        <ImageView
+            android:id="@+id/focusRing"
+            android:layout_width="76dp"
+            android:layout_height="76dp"
+            android:src="@drawable/focus_ring"
+            android:contentDescription="focus"
+            android:visibility="gone" />
+    </FrameLayout>
 
     <LinearLayout
         android:layout_width="match_parent"

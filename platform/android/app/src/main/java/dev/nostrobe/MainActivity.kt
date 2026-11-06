@@ -35,6 +35,7 @@ class MainActivity : AppCompatActivity() {
     private var camera: NoStrobeCamera? = null
     private var recorder: MediaRecorder? = null
     private lateinit var surfaceView: SurfaceView
+    private lateinit var focusRing: android.widget.ImageView
     private lateinit var status: TextView
     private lateinit var recordButton: android.view.View
     private lateinit var lensRow: android.widget.LinearLayout
@@ -55,6 +56,15 @@ class MainActivity : AppCompatActivity() {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.main)
         surfaceView = findViewById(R.id.preview)
+        focusRing = findViewById(R.id.focusRing)
+        surfaceView.setOnTouchListener { v, e ->
+            if (e.action == android.view.MotionEvent.ACTION_UP) {
+                camera?.focusAt(e.x / v.width, e.y / v.height)
+                showFocusRing(e.x, e.y)
+                v.performClick()
+            }
+            true
+        }
         status = findViewById(R.id.status)
         recordButton = findViewById(R.id.record)
         recordButton.setOnClickListener { toggleRecord() }
@@ -171,6 +181,24 @@ class MainActivity : AppCompatActivity() {
         if (requestCode == 1 && grantResults.firstOrNull() == PackageManager.PERMISSION_GRANTED &&
             surfaceView.holder.surface.isValid && camera == null
         ) startCamera()
+    }
+
+    /** The ring appears at the tap, shrinks onto it and fades out. */
+    private fun showFocusRing(x: Float, y: Float) {
+        focusRing.animate().cancel()
+        // The ring is GONE between taps, so its measured size can be 0: use the layout size.
+        val size = 76f * resources.displayMetrics.density
+        focusRing.translationX = x - size / 2f
+        focusRing.translationY = y - size / 2f
+        focusRing.visibility = android.view.View.VISIBLE
+        focusRing.alpha = 1f
+        focusRing.scaleX = 1.5f
+        focusRing.scaleY = 1.5f
+        focusRing.animate().scaleX(1f).scaleY(1f).setDuration(200).withEndAction {
+            focusRing.animate().alpha(0f).setStartDelay(900).setDuration(300).withEndAction {
+                focusRing.visibility = android.view.View.GONE
+            }.start()
+        }.start()
     }
 
     private fun selectLens(index: Int) {
