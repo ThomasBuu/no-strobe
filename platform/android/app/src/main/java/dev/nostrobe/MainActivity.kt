@@ -13,12 +13,16 @@ import android.util.Size
 import android.view.SurfaceHolder
 import android.view.SurfaceView
 import android.widget.Button
+import android.widget.SeekBar
 import android.widget.TextView
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import java.io.File
+import kotlin.math.ln
+import kotlin.math.min
+import kotlin.math.pow
 
 /**
  * Preview, status readout, and record button. The shutter is driven by the Rust controller.
@@ -29,6 +33,18 @@ class MainActivity : AppCompatActivity() {
     private lateinit var surfaceView: SurfaceView
     private lateinit var status: TextView
     private lateinit var recordButton: Button
+    private lateinit var lensButton: Button
+    private lateinit var zoomBar: SeekBar
+    private lateinit var zoomText: TextView
+
+    // Lens and zoom. The default is a pinned physical lens: the phone's logical camera
+    // switches lenses by itself, which moves the sensor under the flicker measurement.
+    private var lensOptions: List<LensOption> = emptyList()
+    private var lensIndex = -1
+    private var zoomRatio = 1f
+    private var zoomMin = 1f
+    private var zoomMax = 1f
+    private var pendingMeta: java.io.Writer? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -37,6 +53,25 @@ class MainActivity : AppCompatActivity() {
         status = findViewById(R.id.status)
         recordButton = findViewById(R.id.record)
         recordButton.setOnClickListener { toggleRecord() }
+        lensButton = findViewById(R.id.lens)
+        zoomBar = findViewById(R.id.zoom)
+        zoomText = findViewById(R.id.zoomText)
+        lensButton.setOnClickListener {
+            if (lensOptions.isEmpty()) return@setOnClickListener
+            lensIndex = (lensIndex + 1) % lensOptions.size
+            zoomRatio = 1f
+            camera?.stop(); startCamera()
+        }
+        zoomBar.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+            override fun onProgressChanged(bar: SeekBar, progress: Int, fromUser: Boolean) {
+                if (!fromUser || zoomMax <= zoomMin) return
+                zoomRatio = zoomMin * (zoomMax / zoomMin).pow(progress / 100f)
+                zoomText.text = "%.1fx".format(zoomRatio)
+                camera?.setZoom(zoomRatio)
+            }
+            override fun onStartTrackingTouch(bar: SeekBar) {}
+            override fun onStopTrackingTouch(bar: SeekBar) {}
+        })
 
         // The SurfaceView surface is created and destroyed with the window, so the camera
         // session must follow the surface, not the activity lifecycle. A Surface cached
@@ -64,17 +99,34 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun startCamera() {
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA)
+            != PackageManager.PERMISSION_GRANTED
+        ) return  // started again from onRequestPermissionsResult
         val manager = getSystemService(CAMERA_SERVICE) as CameraManager
-        // Manual exposure is required; fall back to the first camera if none reports it.
-        val id = manager.cameraIdList.firstOrNull {
-            Camera2Sync.supportsManualSensor(manager.getCameraCharacteristics(it))
-        } ?: manager.cameraIdList.first()
+        if (lensOptions.isEmpty()) {
+            lensOptions = LensOptions.list(manager)
+            lensIndex = LensOptions.defaultIndex(lensOptions)
+        }
+        val option = lensOptions[lensIndex]
+        configureZoom(manager, option)
         val holder = surfaceView.holder
         // Do not call holder.setFixedSize: resizing recreates the surface buffers and the
         // Surface object read after it is the pre-resize one, which createCaptureSession
         // rejects with "Surface was abandoned".
         camera = NoStrobeCamera(
-            manager, id, holder.surface, recorder, pwmMode = true
+            manager, option.logicalId, holder.surface, recorder, pwmMode = true,
+            physicalId = option.physicalId, zoomRatio = zoomRatio,
+            onReady = {
+                // Session configured with the recorder surface: start recording now.
+                val r = recorder
+                if (r != null) {
+                    try {
+                        r.start()
+                    } catch (e: RuntimeException) {
+                        android.util.Log.w("nostrobe", "recorder did not start: ${e.message}")
+                    }
+                }
+            },
         ) { cmd ->
             var s = describe(cmd)
             // Live correction is not available: tell the user when the clip will need it.
@@ -82,40 +134,78 @@ class MainActivity : AppCompatActivity() {
             android.util.Log.d("nostrobe", s)
             runOnUiThread { status.text = s }
         }
+        camera?.meta = pendingMeta
+        pendingMeta = null
         camera?.start()
+    }
+
+    /** Zoom range of the chosen camera; a pinned lens starts at its own 1x. */
+    private fun configureZoom(manager: CameraManager, option: LensOption) {
+        lensButton.text = option.label
+        var lo = 1f
+        var hi = 1f
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            val r = manager.getCameraCharacteristics(option.logicalId)
+                .get(CameraCharacteristics.CONTROL_ZOOM_RATIO_RANGE)
+            if (r != null) { lo = r.lower; hi = r.upper }
+        }
+        if (option.physicalId != null) { lo = maxOf(lo, 1f); hi = min(hi, 8f) }
+        zoomMin = lo
+        zoomMax = maxOf(hi, lo)
+        zoomRatio = zoomRatio.coerceIn(zoomMin, zoomMax)
+        zoomBar.isEnabled = zoomMax > zoomMin
+        zoomBar.progress = if (zoomMax > zoomMin) {
+            (100f * ln(zoomRatio / zoomMin) / ln(zoomMax / zoomMin)).toInt()
+        } else 0
+        zoomText.text = "%.1fx".format(zoomRatio)
+    }
+
+    override fun onRequestPermissionsResult(
+        requestCode: Int, permissions: Array<out String>, grantResults: IntArray,
+    ) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode == 1 && grantResults.firstOrNull() == PackageManager.PERMISSION_GRANTED &&
+            surfaceView.holder.surface.isValid && camera == null
+        ) startCamera()
     }
 
     private fun toggleRecord() {
         if (recorder != null) {
             val (total, locked) = camera?.recordingStats() ?: (0 to 0)
             camera?.closeMeta()
-            recorder?.stop(); recorder?.release(); recorder = null
+            try { recorder?.stop() } catch (e: RuntimeException) {
+                android.util.Log.w("nostrobe", "recorder stopped without data: ${e.message}")
+            }
+            recorder?.release(); recorder = null
             recordButton.text = "record"
             notifyPost(total, locked)
             camera?.stop(); startCamera()
             return
         }
-        val p = CamcorderProfile.get(CamcorderProfile.QUALITY_HIGH)
+        // 1080p keeps the encoder and the lens stream manageable; QUALITY_HIGH can be 4K.
+        val quality = if (CamcorderProfile.hasProfile(CamcorderProfile.QUALITY_1080P))
+            CamcorderProfile.QUALITY_1080P else CamcorderProfile.QUALITY_HIGH
+        val p = CamcorderProfile.get(quality)
         val r = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) MediaRecorder(this) else MediaRecorder()
+        // The call order matters: the source first, then the format, then the encoders.
+        // Video only for now: audio would need the RECORD_AUDIO permission.
+        r.setVideoSource(MediaRecorder.VideoSource.SURFACE)
+        r.setOutputFormat(MediaRecorder.OutputFormat.MPEG_4)
         r.setVideoEncodingBitRate(p.videoBitRate)
         r.setVideoFrameRate(p.videoFrameRate)
         r.setVideoSize(p.videoFrameWidth, p.videoFrameHeight)
-        r.setAudioEncodingBitRate(p.audioBitRate)
-        r.setAudioChannels(p.audioChannels)
-        r.setAudioSamplingRate(p.audioSampleRate)
-        r.setOutputFormat(MediaRecorder.OutputFormat.MPEG_4)
         r.setVideoEncoder(MediaRecorder.VideoEncoder.H264)
-        r.setAudioEncoder(MediaRecorder.AudioEncoder.AAC)
+        r.setOrientationHint(90)
         r.setOutputFile(File(externalCacheDir, "clip.mp4").path)
         r.prepare()
-        r.start()
         recorder = r
         recordButton.text = "stop"
-        // The recorder surface is added by the session, so rebuild it.
-        camera?.stop(); startCamera()
         val w = java.io.FileWriter(File(externalCacheDir, "clip.csv"))
         w.write("timestamp_ns,exposure_ns,iso,luma,state,freq_hz,stale\n")
-        camera?.meta = w
+        pendingMeta = w
+        // The recorder surface is added by the session, so rebuild it; the recorder starts
+        // once the session is configured (MediaRecorder needs frames to flow to its surface).
+        camera?.stop(); startCamera()
     }
 
     /** Live correction is not available (MediaRecorder), so say when post-processing is needed. */
@@ -136,6 +226,7 @@ class MainActivity : AppCompatActivity() {
             NsJni.MODE_GAP -> "gap"
             NsJni.MODE_FLASH -> "flash"
             NsJni.MODE_PWM -> "pwm"
+            NsJni.MODE_AUTO -> "auto (no flicker found)"
             else -> "?"
         }
         val state = if (cmd.state == NsJni.STATE_LOCKED) "locked" else "search"

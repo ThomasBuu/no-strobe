@@ -128,3 +128,31 @@ fn static_scene_never_locks() {
         assert_eq!(cmd.state, State::Search, "locked on a static scene");
     }
 }
+
+/// Deterministic noise in [-amp, amp] (no rand dependency).
+fn noise(seed: &mut u64, amp: f64) -> f64 {
+    *seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+    ((*seed >> 33) as f64 / (1u64 << 31) as f64 - 0.5) * 2.0 * amp
+}
+
+fn never_locks_on_flat_scene(level: f64, noise_amp: f64) {
+    let mut c = PwmController::new(limits(), 0.0);
+    let mut seed = 42u64;
+    for _ in 0..1500 {
+        let p: Vec<f64> = (0..ROWS).map(|_| level + noise(&mut seed, noise_amp)).collect();
+        let cmd = c.on_profile(&p);
+        assert_ne!(cmd.state, State::Locked, "locked on a scene without flicker (f = {} Hz)", c.frequency_hz());
+    }
+    assert_eq!(c.frequency_hz(), 0.0, "invented a frequency from noise");
+}
+
+#[test]
+fn bright_scene_without_flicker_never_locks_without_line_rate() {
+    never_locks_on_flat_scene(0.5, 0.002);
+}
+
+#[test]
+fn dark_noisy_scene_never_locks_without_line_rate() {
+    // What the Pixel sees when pointed at a dark room: tiny luma, noise-dominated.
+    never_locks_on_flat_scene(0.01, 0.003);
+}

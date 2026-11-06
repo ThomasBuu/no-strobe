@@ -10,7 +10,7 @@ android {
     defaultConfig {
         applicationId = "dev.nostrobe"
         // SENSOR_INFO_ROLLING_SHUTTER_SUSTAIN_DURATION needs API 31.
-        minSdk = 26
+        minSdk = 28
         targetSdk = 34
         // libns_ffi.so is placed in src/main/jniLibs/<abi>/ by
         // `cargo ndk -t arm64-v8a -o app/src/main/jniLibs/arm64-v8a build --release --features android`

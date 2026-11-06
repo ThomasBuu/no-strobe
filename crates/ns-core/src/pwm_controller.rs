@@ -25,6 +25,13 @@ const RESIDUAL_TOLERANCE: f64 = 0.4;
 const SWEEP_COARSE: f64 = 1.05;
 /// Hill climb step that is precise enough to lock (0.2 % on the exposure).
 const HILL_FINE: f64 = 1.002;
+/// A banding minimum only counts if the metric really dips: the three probes must differ by
+/// this fraction of the largest one. Pure sensor noise gives near-equal, random values.
+const EVIDENCE_SPREAD: f64 = 0.25;
+/// Banding below this amplitude (luma 0..1, ~1/255) is indistinguishable from sensor noise.
+const NOISE_FLOOR: f64 = 0.004;
+/// A frame darker than this carries no measurable flicker (everything is noise).
+const MIN_LUMA: f64 = 0.02;
 const MIN_HZ: f64 = 100.0;
 const MAX_HZ: f64 = 5000.0;
 
@@ -59,6 +66,11 @@ pub struct PwmController {
     hill_step: f64,
     probe: usize,
     probe_res: [f64; 3],
+    amp_max: f64,
+    luma_last: f64,
+    /// Flicker was shown to exist (evidence gate passed, or `f` measured on the profile).
+    /// Near a true null the banding is tiny by design, so the gate only applies before.
+    flicker_seen: bool,
 }
 
 impl PwmController {
@@ -81,6 +93,9 @@ impl PwmController {
             hill_step: 0.0,
             probe: 0,
             probe_res: [0.0; 3],
+            amp_max: 0.0,
+            luma_last: 0.0,
+            flicker_seen: false,
         }
     }
 
@@ -136,6 +151,7 @@ impl PwmController {
         self.hill_step = 1.25;
         self.probe = 0;
         self.probe_res = [0.0; 3];
+        self.flicker_seen = false;
         self.phase = Phase::Hill;
         self.emit(self.hill_exposure, State::Search, 0.0)
     }
@@ -152,6 +168,8 @@ impl PwmController {
         }
         self.frames_since_check = 0;
         self.probe_res[self.probe] = pwm::banding_metric(profile, self.hill_exposure);
+        self.amp_max = self.amp_max.max(pwm::banding_amplitude(profile));
+        self.luma_last = profile.iter().sum::<f64>() / profile.len().max(1) as f64;
         self.probe += 1;
         if self.probe < 3 {
             // Probe the centre, then one step up, then one step down.
@@ -164,6 +182,23 @@ impl PwmController {
             return self.emit(next, State::Search, self.confidence);
         }
         self.probe = 0;
+        // Is there any flicker to find? Without evidence the three values are noise and
+        // the "minimum" is random: stay in Search at the same exposure, never lock.
+        let hi = self.probe_res.iter().cloned().fold(0.0f64, f64::max);
+        let lo = self.probe_res.iter().cloned().fold(f64::INFINITY, f64::min);
+        let evidence = hi > 0.0
+            && (hi - lo) / hi > EVIDENCE_SPREAD
+            && self.amp_max > NOISE_FLOOR
+            && self.luma_last >= MIN_LUMA;
+        self.amp_max = 0.0;
+        if evidence {
+            self.flicker_seen = true;
+        }
+        if !evidence && !self.flicker_seen {
+            self.hill_step = 1.25;
+            self.hill_exposure = self.hill_base;
+            return self.emit(self.hill_exposure, State::Search, 0.0);
+        }
         // Three samples: centre, *step, /step. Move to the best; shrink the step
         // when the centre is already the local minimum.
         let mut best_idx = 0usize;
@@ -267,6 +302,7 @@ impl PwmController {
         self.probe = 0;
         self.probe_res = [0.0; 3];
         self.frames_since_check = 0;
+        self.flicker_seen = true;
         self.phase = Phase::Hill;
         Some(e)
     }

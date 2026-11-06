@@ -8,10 +8,14 @@ import android.hardware.camera2.CameraManager
 import android.hardware.camera2.CaptureRequest
 import android.hardware.camera2.CaptureResult
 import android.hardware.camera2.TotalCaptureResult
+import android.hardware.camera2.params.OutputConfiguration
+import android.hardware.camera2.params.SessionConfiguration
+import android.os.Build
 import android.media.MediaRecorder
 import android.media.ImageReader
 import android.os.Handler
 import android.os.HandlerThread
+import android.os.SystemClock
 import android.util.Log
 import java.io.Writer
 import java.util.Locale
@@ -32,6 +36,11 @@ class NoStrobeCamera(
     private val previewSurface: Surface,
     private val recorder: MediaRecorder?,
     private val pwmMode: Boolean,
+    /** Pins one lens of a logical multi-camera; null leaves the lens choice to the phone. */
+    private val physicalId: String? = null,
+    private var zoomRatio: Float = 1f,
+    /** Called once the capture session is configured and the repeating request runs. */
+    private val onReady: () -> Unit = {},
     private val onStatus: (NsCommand) -> Unit,
 ) {
     private var device: CameraDevice? = null
@@ -55,6 +64,13 @@ class NoStrobeCamera(
     private val resultExposure = HashMap<Long, Long>()
     private var staleFrames = 0
     @Volatile private var stopped = false
+
+    // No flicker found: do not leave the sensor on short exposures and a maxed ISO (a dark,
+    // noisy clip). After PROBE_MS without a lock the camera goes back to auto-exposure for
+    // REST_MS, then probes again (the lights may have changed).
+    private var surfaceList: List<Surface> = emptyList()
+    private var probeSinceMs = 0L
+    private var restUntilMs = 0L
 
     // Per-frame log written while recording (one line per analysed frame, plus the frames
     // dropped as stale). Live correction is not possible with MediaRecorder, so the clip is
@@ -138,7 +154,8 @@ class NoStrobeCamera(
 
     fun start() {
         stopped = false
-        val chars = manager.getCameraCharacteristics(cameraId)
+        // A pinned lens has its own sensor: exposure range, readout time and stream sizes.
+        val chars = manager.getCameraCharacteristics(physicalId ?: cameraId)
         val limits = Camera2Sync.limitsFromCharacteristics(chars)
         sustainUs = limits.sustainUs
         isoMin = limits.minIso
@@ -171,6 +188,7 @@ class NoStrobeCamera(
 
         val surfaces = listOf(previewSurface, r.surface) +
             (recorder?.surface?.let { listOf(it) } ?: emptyList())
+        surfaceList = surfaces
 
         manager.openCamera(cameraId, object : CameraDevice.StateCallback() {
             override fun onOpened(d: CameraDevice) {
@@ -201,18 +219,67 @@ class NoStrobeCamera(
         }, null)
     }
 
+    private fun applyZoom(b: CaptureRequest.Builder) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            b.set(CaptureRequest.CONTROL_ZOOM_RATIO, zoomRatio)
+        }
+    }
+
+    /** Zoom without restarting the session: the repeating request is reissued. */
+    fun setZoom(ratio: Float) {
+        zoomRatio = ratio
+        val b = builder ?: return
+        applyZoom(b)
+        try {
+            session?.setRepeatingRequest(b.build(), resultCallback, handler)
+        } catch (e: Exception) {
+            Log.w(TAG, "zoom not applied: ${e.message}")
+        }
+    }
+
     private fun createSession(d: CameraDevice, surfaces: List<Surface>) {
         val b = d.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW)
         for (s in surfaces) b.addTarget(s)
+        applyZoom(b)
         builder = b
-        d.createCaptureSession(surfaces, object : CameraCaptureSession.StateCallback() {
+        val callback = object : CameraCaptureSession.StateCallback() {
             override fun onConfigured(s: CameraCaptureSession) {
                 session = s
                 s.setRepeatingRequest(b.build(), resultCallback, handler)
+                onReady()
             }
 
-            override fun onConfigureFailed(s: CameraCaptureSession) {}
-        }, null)
+            override fun onConfigureFailed(s: CameraCaptureSession) {
+                Log.w(TAG, "session configuration failed (physical lens $physicalId)")
+            }
+        }
+        val executor = java.util.concurrent.Executor { r -> (handler ?: Handler(android.os.Looper.getMainLooper())).post(r) }
+        if (physicalId != null) {
+            // Streams bound to one physical lens: the phone cannot switch lenses under us.
+            val configs = surfaces.map { sf ->
+                OutputConfiguration(sf).also { it.setPhysicalCameraId(physicalId) }
+            }
+            d.createCaptureSession(
+                SessionConfiguration(SessionConfiguration.SESSION_REGULAR, configs, executor, callback)
+            )
+        } else {
+            d.createCaptureSession(surfaces, callback, null)
+        }
+    }
+
+    // Shortest exposure this sensor really delivers. The advertised range can be shorter
+    // (and differs per lens): learned when the sensor keeps returning a longer exposure.
+    private var minExposureOverrideUs = 0.0
+    private var lastActualNs = 0L
+    private var mismatchRun = 0
+
+    private fun currentLimits(): NsJni.CameraLimits {
+        val base = Camera2Sync.limitsFromCharacteristics(
+            manager.getCameraCharacteristics(physicalId ?: cameraId)
+        )
+        return if (minExposureOverrideUs > base.minExposureUs) {
+            base.copy(minExposureUs = minExposureOverrideUs)
+        } else base
     }
 
     private fun onFrame(reader: ImageReader) {
@@ -222,10 +289,9 @@ class NoStrobeCamera(
             return  // reader closed during shutdown
         } ?: return
         try {
+            if (SystemClock.elapsedRealtime() < restUntilMs) return  // auto-exposure rest
             if (pwmMode && pwm == null) {
-                val limits = Camera2Sync.limitsFromCharacteristics(
-                    manager.getCameraCharacteristics(cameraId)
-                )
+                val limits = currentLimits()
                 lineRateHz = LineProfileExtractor.lineRate(image.height, sustainUs * 1000.0)
                 pwm = NsJni.createPwm(limits, lineRateHz)
             }
@@ -239,6 +305,21 @@ class NoStrobeCamera(
             // Skip frames still carrying the previous exposure; they would pollute the trial.
             if (!exposureMatches(actualExposureNs(image.timestamp), requestedExposureNs)) {
                 staleFrames += 1
+                val actual = actualExposureNs(image.timestamp)
+                mismatchRun = if (actual > requestedExposureNs &&
+                    abs(actual - lastActualNs) <= actual / 100) mismatchRun + 1 else 0
+                lastActualNs = actual
+                if (mismatchRun >= 20) {
+                    // Requested below the sensor's real minimum: relearn the range.
+                    minExposureOverrideUs = actual / 1000.0 * 1.02
+                    Log.i(TAG, "sensor minimum exposure is about ${actual / 1000} us, not the advertised one")
+                    mismatchRun = 0
+                    staleFrames = 0
+                    pwm?.close(); pwm = null
+                    last = null
+                    requestedExposureNs = 0L
+                    return
+                }
                 recordFrame(image.timestamp, actualExposureNs(image.timestamp), last, -1.0, true)
                 if (staleFrames == 60) {
                     Log.w(TAG, "sensor ignores the requested exposure (asked $requestedExposureNs ns, " +
@@ -264,11 +345,19 @@ class NoStrobeCamera(
                 cmd
             }
             onStatus(applied)
+            val now = SystemClock.elapsedRealtime()
+            if (applied.state == NsJni.STATE_LOCKED || probeSinceMs == 0L) {
+                probeSinceMs = now
+            } else if (now - probeSinceMs > PROBE_MS) {
+                fallBackToAuto(now, applied)
+                return
+            }
             recordFrame(image.timestamp, actualExposureNs(image.timestamp), applied, lumaMean, false)
             if (needsUpdate(last, applied)) {
                 last = applied
                 val b = builder!!
                 Camera2Sync.apply(b, applied)
+                applyZoom(b)
                 requestedExposureNs = (cmd.exposureUs * 1000.0).toLong()
                 session?.setRepeatingRequest(b.build(), resultCallback, handler)
             }
@@ -277,6 +366,36 @@ class NoStrobeCamera(
         } finally {
             image.close()
         }
+    }
+
+    /** Back to the camera's own auto-exposure; probing resumes after REST_MS. */
+    private fun fallBackToAuto(now: Long, applied: NsCommand) {
+        Log.i(TAG, "no flicker locked in $PROBE_MS ms: auto-exposure for $REST_MS ms")
+        restUntilMs = now + REST_MS
+        probeSinceMs = 0L
+        pwm?.close(); pwm = null
+        requestedExposureNs = 0L
+        budgetUsIso = 0.0
+        latestAutoBudget = 0.0
+        autoWait = 0
+        staleFrames = 0
+        last = null
+        val d = device
+        val sess = session
+        if (d != null && sess != null) {
+            try {
+                // A fresh template request: AE on, no manual exposure, ISO or frame duration.
+                val b = d.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW)
+                for (t in surfaceList) b.addTarget(t)
+                applyZoom(b)
+                builder = b
+                sess.setRepeatingRequest(b.build(), resultCallback, handler)
+            } catch (e: Exception) {
+                Log.w(TAG, "could not return to auto-exposure: ${e.message}")
+            }
+        }
+        onStatus(applied.copy(mode = NsJni.MODE_AUTO, state = NsJni.STATE_SEARCH,
+            periodUs = 0.0, confidence = 0.0))
     }
 
     private fun needsUpdate(prev: NsCommand?, cmd: NsCommand): Boolean {
@@ -307,9 +426,15 @@ class NoStrobeCamera(
         budgetUsIso = 0.0
         latestAutoBudget = 0.0
         autoWait = 0
+        probeSinceMs = 0L
+        restUntilMs = 0L
+        mismatchRun = 0
+        lastActualNs = 0L
     }
 
     private companion object {
         const val TAG = "nostrobe"
+        const val PROBE_MS = 6_000L
+        const val REST_MS = 12_000L
     }
 }

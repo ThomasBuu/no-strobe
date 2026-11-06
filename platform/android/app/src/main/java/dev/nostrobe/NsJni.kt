@@ -46,6 +46,8 @@ object NsJni {
     const val MODE_GAP = 1
     const val MODE_FLASH = 2
     const val MODE_PWM = 3
+    /** Not a controller mode: the app went back to auto-exposure (no flicker found). */
+    const val MODE_AUTO = -1
     const val STATE_SEARCH = 0
     const val STATE_LOCKED = 1
 
