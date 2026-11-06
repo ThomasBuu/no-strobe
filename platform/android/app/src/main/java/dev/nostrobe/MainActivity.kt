@@ -200,6 +200,8 @@ class MainActivity : AppCompatActivity() {
         camera = NoStrobeCamera(
             manager, option.logicalId, holder.surface, recorder, pwmMode = true,
             physicalId = option.physicalId, zoomRatio = zoomRatio, evBias = evBias,
+            simFlickerHz = intent.getDoubleExtra("sim_hz", 0.0),
+            forceAutoOnly = intent.getBooleanExtra("force_auto_only", false),
             onReady = {
                 // Session configured with the recorder surface: start recording now.
                 val r = recorder

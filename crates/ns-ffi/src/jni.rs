@@ -150,3 +150,24 @@ pub extern "system" fn Java_dev_nostrobe_NsJni_nativeDestroyPwm(
         unsafe { drop(Box::from_raw(handle as *mut PwmController)) };
     }
 }
+
+/// Test only: the per-row luminance profile a PWM light would give (see
+/// `ns_core::pwm::synthetic_profile`). The app's simulated-flicker mode uses it to feed the
+/// closed loop with a flicker that reacts to the exposure the sensor really applied.
+#[no_mangle]
+pub extern "system" fn Java_dev_nostrobe_NsJni_nativeSyntheticProfile<'a>(
+    mut env: JNIEnv<'a>,
+    _class: JClass,
+    exposure_us: jdouble,
+    f_hz: jdouble,
+    phase_cycles: jdouble,
+    duty: jdouble,
+    line_rate_hz: jdouble,
+    rows: jni::sys::jint,
+) -> jni::objects::JDoubleArray<'a> {
+    let rows = rows.max(0) as usize;
+    let p = ns_core::pwm::synthetic_profile(exposure_us, f_hz, phase_cycles, duty, line_rate_hz, rows);
+    let arr = env.new_double_array(rows as jni::sys::jsize).expect("new_double_array");
+    let _ = env.set_double_array_region(&arr, 0, &p);
+    arr
+}

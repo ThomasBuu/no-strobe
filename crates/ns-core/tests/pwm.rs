@@ -156,3 +156,125 @@ fn dark_noisy_scene_never_locks_without_line_rate() {
     // What the Pixel sees when pointed at a dark room: tiny luma, noise-dominated.
     never_locks_on_flat_scene(0.01, 0.003);
 }
+
+/// Limits a real phone reports (Xperia 1 III): minimum ~0, long maximum, 30 fps only.
+fn phone_limits() -> CameraLimits {
+    CameraLimits {
+        min_exposure_us: 20.0,
+        max_exposure_us: 157_076.0,
+        sustain_us: 0.0,
+        supported_fps: vec![30.0],
+        min_iso: 75.0,
+        max_iso: 9618.0,
+    }
+}
+
+#[test]
+fn blind_sweep_with_phone_limits_locks_on_a_multiple_of_the_period() {
+    for f_hz in [300.0, 500.0, 1000.0, 2000.0] {
+        let mut c = PwmController::new(phone_limits(), 0.0);
+        let mut phase = 0.0;
+        let mut last = c.on_profile(&profile_for(1000.0, f_hz, phase, 0.3, LINE_RATE, ROWS));
+        for _ in 0..600 {
+            phase += 0.0137;
+            last = c.on_profile(&profile_for(last.exposure_us, f_hz, phase, 0.3, LINE_RATE, ROWS));
+            if last.state == State::Locked {
+                break;
+            }
+        }
+        assert_eq!(last.state, State::Locked, "never locked at {f_hz} Hz");
+        let t_us = 1e6 / f_hz;
+        let k = (last.exposure_us / t_us).round();
+        assert!(k >= 1.0, "locked below one period at {f_hz} Hz: {} us", last.exposure_us);
+        assert!(
+            (last.exposure_us - k * t_us).abs() < 0.03 * t_us,
+            "{f_hz} Hz: exposure {} us is not a multiple of {t_us} us",
+            last.exposure_us
+        );
+    }
+}
+
+#[test]
+fn blind_lock_holds_over_time_and_follows_a_frequency_change() {
+    let mut c = PwmController::new(phone_limits(), 0.0);
+    let mut f_hz = 500.0;
+    let mut phase = 0.0;
+    let mut last = c.on_profile(&profile_for(1000.0, f_hz, phase, 0.3, LINE_RATE, ROWS));
+    let mut locked_at = None;
+    for i in 0..600 {
+        phase += 0.0137;
+        last = c.on_profile(&profile_for(last.exposure_us, f_hz, phase, 0.3, LINE_RATE, ROWS));
+        if last.state == State::Locked && locked_at.is_none() {
+            locked_at = Some(i);
+        }
+    }
+    let start = locked_at.expect("never locked");
+    // Hold: 600 more frames at the same flicker stay locked (the periodic re-check is local).
+    let mut locked_frames = 0;
+    let mut min_ratio = f64::INFINITY;
+    let mut max_ratio = 0.0f64;
+    for _ in 0..600 {
+        phase += 0.0137;
+        last = c.on_profile(&profile_for(last.exposure_us, f_hz, phase, 0.3, LINE_RATE, ROWS));
+        if last.state == State::Locked {
+            locked_frames += 1;
+        }
+        let r = last.exposure_us / (1e6 / f_hz);
+        min_ratio = min_ratio.min(r);
+        max_ratio = max_ratio.max(r);
+    }
+    assert!(locked_frames >= 540, "locked on only {locked_frames}/600 frames after locking at {start}");
+    let k = ((min_ratio + max_ratio) / 2.0).round();
+    assert!(min_ratio > k - 0.06 && max_ratio < k + 0.06, "exposure wandered: {min_ratio}..{max_ratio} periods");
+
+    // The light changes frequency: the lock is lost and found again at the new multiple.
+    f_hz = 640.0;
+    let mut relocked = false;
+    for _ in 0..900 {
+        phase += 0.0137;
+        last = c.on_profile(&profile_for(last.exposure_us, f_hz, phase, 0.3, LINE_RATE, ROWS));
+        if last.state == State::Locked {
+            let t_us = 1e6 / f_hz;
+            let k = (last.exposure_us / t_us).round();
+            if k >= 1.0 && (last.exposure_us - k * t_us).abs() < 0.03 * t_us {
+                relocked = true;
+                break;
+            }
+        }
+    }
+    assert!(relocked, "did not relock after 500 -> 640 Hz");
+}
+
+#[test]
+fn noisy_blind_sweep_never_locks_on_a_false_minimum() {
+    // A real sensor adds noise to every row: a "minimum" found in noise must not count.
+    for (f_hz, seed0) in [(500.0, 1u64), (500.0, 7), (800.0, 3), (1200.0, 11), (300.0, 5)] {
+        let mut c = PwmController::new(phone_limits(), 0.0);
+        let mut seed = seed0;
+        let mut phase = 0.0;
+        let mut noisy = |e: f64, phase: f64, seed: &mut u64| -> Vec<f64> {
+            profile_for(e, f_hz, phase, 0.3, LINE_RATE, ROWS)
+                .into_iter()
+                .map(|v| v + noise(seed, 0.01))
+                .collect()
+        };
+        let mut last = c.on_profile(&noisy(1000.0, phase, &mut seed));
+        for _ in 0..1500 {
+            phase += 0.0137;
+            last = c.on_profile(&noisy(last.exposure_us, phase, &mut seed));
+            if last.state == State::Locked {
+                // What matters is the banding left at the locked exposure, against the banding
+                // an unsynchronised exposure (half a period) would show.
+                let clean = |e: f64| pwm::banding_amplitude(&profile_for(e, f_hz, 0.31, 0.3, LINE_RATE, ROWS));
+                let left = clean(last.exposure_us);
+                let unsynced = clean(0.5e6 / f_hz) * (0.5e6 / f_hz) / last.exposure_us.max(1.0);
+                assert!(
+                    last.exposure_us >= 1e6 / 5000.0 && left < 0.3 * unsynced.max(0.01),
+                    "{f_hz} Hz (seed {seed0}): locked at {} us leaving banding {left:.4} (f = {} Hz)",
+                    last.exposure_us,
+                    c.frequency_hz()
+                );
+            }
+        }
+    }
+}

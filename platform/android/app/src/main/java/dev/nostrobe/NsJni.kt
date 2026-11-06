@@ -41,6 +41,14 @@ object NsJni {
     private external fun nativeOnProfile(handle: Long, profile: DoubleArray, out: DoubleArray)
 
     private external fun nativeDestroyPwm(handle: Long)
+    private external fun nativeSyntheticProfile(
+        exposureUs: Double, fHz: Double, phaseCycles: Double, duty: Double, lineRateHz: Double, rows: Int,
+    ): DoubleArray
+
+    /** Test only: the row profile of a PWM light at [fHz], for the simulated-flicker mode. */
+    fun syntheticProfile(
+        exposureUs: Double, fHz: Double, phaseCycles: Double, duty: Double, lineRateHz: Double, rows: Int,
+    ): DoubleArray = nativeSyntheticProfile(exposureUs, fHz, phaseCycles, duty, lineRateHz, rows)
 
     const val MODE_INTEGRATE = 0
     const val MODE_GAP = 1

@@ -46,6 +46,10 @@ class NoStrobeCamera(
     private var evBias: Float = 0f,
     /** Called once the capture session is configured and the repeating request runs. */
     private val onReady: () -> Unit = {},
+    /** Debug: pretend the scene has a PWM light at this frequency (0 = real scene). */
+    private val simFlickerHz: Double = 0.0,
+    /** Debug: behave like a camera without manual exposure. */
+    private val forceAutoOnly: Boolean = false,
     private val onStatus: (NsCommand) -> Unit,
 ) {
     private var device: CameraDevice? = null
@@ -177,7 +181,7 @@ class NoStrobeCamera(
 
     fun start() {
         stopped = false
-        autoOnly = pwmMode && !Camera2Sync.supportsManualSensor(manager.getCameraCharacteristics(cameraId))
+        autoOnly = forceAutoOnly || (pwmMode && !Camera2Sync.supportsManualSensor(manager.getCameraCharacteristics(cameraId)))
         if (autoOnly) {
             Log.w(TAG, "camera $cameraId has no MANUAL_SENSOR capability: flicker sync unavailable")
             onStatus(unsupportedStatus())
@@ -487,7 +491,14 @@ class NoStrobeCamera(
             staleFrames = 0
             var lumaMean = 0.0
             val cmd = if (pwmMode) {
-                val prof = LineProfileExtractor.rowProfile(image, 1)
+                var prof = LineProfileExtractor.rowProfile(image, 1)
+                if (simFlickerHz > 0.0) {
+                    // Simulated flicker: what a PWM light would show at the exposure the sensor
+                    // really used for this frame, with a phase that follows the frame time.
+                    val expUs = actualExposureNs(image.timestamp) / 1000.0
+                    val phase = (image.timestamp * 1e-9 * simFlickerHz) % 1.0
+                    prof = NsJni.syntheticProfile(expUs, simFlickerHz, phase, 0.3, SIM_LINE_RATE_HZ, prof.size)
+                }
                 lumaMean = if (prof.isEmpty()) 0.0 else prof.average()
                 pwm!!.onProfile(prof)
             } else {
@@ -505,7 +516,7 @@ class NoStrobeCamera(
             val now = SystemClock.elapsedRealtime()
             if (applied.state == NsJni.STATE_LOCKED || probeSinceMs == 0L) {
                 probeSinceMs = now
-            } else if (now - probeSinceMs > PROBE_MS) {
+            } else if (now - probeSinceMs > (if (applied.confidence >= 0.25) PROBE_SIGNAL_MS else PROBE_MS)) {
                 fallBackToAuto(now, applied)
                 return
             }
@@ -593,7 +604,10 @@ class NoStrobeCamera(
     private companion object {
         const val TAG = "nostrobe"
         const val PROBE_MS = 6_000L
+        /** Longer while the controller reports a real flicker it is still homing in on. */
+        const val PROBE_SIGNAL_MS = 40_000L
         const val REST_MS = 12_000L
         const val FOCUS_HOLD_MS = 3_000L
+        const val SIM_LINE_RATE_HZ = 40_000.0
     }
 }
