@@ -14,6 +14,23 @@ class AspectFrameLayout @JvmOverloads constructor(
     context: Context, attrs: AttributeSet? = null,
 ) : FrameLayout(context, attrs) {
 
+    private var aspectWidth = 16
+    private var aspectHeight = 9
+
+    /**
+     * Sets the camera stream or video aspect ratio (e.g. 1920x1080 or 16:9).
+     */
+    fun setAspectRatio(width: Int, height: Int) {
+        if (width <= 0 || height <= 0) return
+        val w = maxOf(width, height)
+        val h = minOf(width, height)
+        if (aspectWidth != w || aspectHeight != h) {
+            aspectWidth = w
+            aspectHeight = h
+            requestLayout()
+        }
+    }
+
     override fun onMeasure(widthSpec: Int, heightSpec: Int) {
         val maxW = MeasureSpec.getSize(widthSpec)
         val maxH = MeasureSpec.getSize(heightSpec)
@@ -21,10 +38,10 @@ class AspectFrameLayout @JvmOverloads constructor(
             super.onMeasure(widthSpec, heightSpec)
             return
         }
-        // The window's own orientation (the display metrics of a foldable's inner screen said the
-        // opposite and squashed the picture into a landscape box while the content was upright).
-        val landscape = resources.configuration.orientation == android.content.res.Configuration.ORIENTATION_LANDSCAPE
-        val ratio = if (landscape) 16f / 9f else 9f / 16f  // width / height
+        val isLandscape = resources.configuration.orientation == android.content.res.Configuration.ORIENTATION_LANDSCAPE
+            || maxW > maxH
+        val targetRatio = aspectWidth.toFloat() / aspectHeight.toFloat()
+        val ratio = if (isLandscape) targetRatio else (1f / targetRatio)  // width / height
         var w = maxW
         var h = (maxW / ratio).toInt()
         if (h > maxH) {

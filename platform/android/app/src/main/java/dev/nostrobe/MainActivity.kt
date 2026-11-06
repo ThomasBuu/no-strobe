@@ -81,12 +81,42 @@ class MainActivity : AppCompatActivity() {
     private var evStep = 0f
     private var evMinIndex = 0
     private var pendingMeta: java.io.Writer? = null
+    private var currentPreviewSize = Size(1920, 1080)
+
+    /**
+     * Choose the largest 16:9 preview size up to 1080p supported by the camera.
+     * Setting this explicitly prevents the Camera2 HAL from falling back to square streams (e.g. 1920x1920).
+     */
+    private fun selectPreviewSize(manager: CameraManager, logicalId: String): Size {
+        val chars = try { manager.getCameraCharacteristics(logicalId) } catch (_: Exception) { return Size(1920, 1080) }
+        val map = chars.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP) ?: return Size(1920, 1080)
+        val sizes = map.getOutputSizes(SurfaceHolder::class.java) ?: return Size(1920, 1080)
+        val targetRatio = 16f / 9f
+        val matching = sizes.filter { s ->
+            val r = s.width.toFloat() / s.height.toFloat()
+            kotlin.math.abs(r - targetRatio) < 0.05f && s.height <= 1080 && s.width <= 1920
+        }
+        return matching.maxByOrNull { it.width.toLong() * it.height }
+            ?: sizes.filter { it.height <= 1080 && it.width <= 1920 }.maxByOrNull { it.width.toLong() * it.height }
+            ?: Size(1920, 1080)
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         layoutPortrait = resources.configuration.orientation != android.content.res.Configuration.ORIENTATION_LANDSCAPE
         setContentView(R.layout.main)
         surfaceView = findViewById(R.id.preview)
+        val aspectLayout = findViewById<AspectFrameLayout?>(R.id.aspectLayout)
+        val manager = getSystemService(CAMERA_SERVICE) as CameraManager
+        if (lensOptions.isEmpty()) {
+            lensOptions = LensOptions.list(manager)
+            lensIndex = LensOptions.defaultIndex(lensOptions)
+        }
+        val initialOption = lensOptions.getOrNull(lensIndex)
+        val initialSize = if (initialOption != null) selectPreviewSize(manager, initialOption.logicalId) else Size(1920, 1080)
+        currentPreviewSize = initialSize
+        surfaceView.holder.setFixedSize(initialSize.width, initialSize.height)
+        aspectLayout?.setAspectRatio(initialSize.width, initialSize.height)
         focusRing = findViewById(R.id.focusRing)
         val pinch = android.view.ScaleGestureDetector(this,
             object : android.view.ScaleGestureDetector.SimpleOnScaleGestureListener() {
@@ -229,9 +259,8 @@ class MainActivity : AppCompatActivity() {
         configureZoom(manager, option)
         configureExposure(manager, option)
         val holder = surfaceView.holder
-        // Do not call holder.setFixedSize: resizing recreates the surface buffers and the
-        // Surface object read after it is the pre-resize one, which createCaptureSession
-        // rejects with "Surface was abandoned".
+        // Note: holder.setFixedSize was configured beforehand (in onCreate or selectLens),
+        // ensuring the buffer geometry matches the 16:9 preview stream and eliminates anamorphic distortion.
         camera = NoStrobeCamera(
             manager, option.logicalId, holder.surface, recorder, pwmMode = !intent.getBooleanExtra("strobe_mode", false),
             // While recording, do not pin a physical lens: on a Pixel 11 Pro Fold the recorder
@@ -425,7 +454,17 @@ class MainActivity : AppCompatActivity() {
         if (index == lensIndex || index !in lensOptions.indices) return
         lensIndex = index
         zoomRatio = 1f
-        camera?.stop(); startCamera()
+        camera?.stop()
+        val manager = getSystemService(CAMERA_SERVICE) as CameraManager
+        val option = lensOptions[lensIndex]
+        val pSize = selectPreviewSize(manager, option.logicalId)
+        if (pSize != currentPreviewSize) {
+            currentPreviewSize = pSize
+            surfaceView.holder.setFixedSize(pSize.width, pSize.height)
+            findViewById<AspectFrameLayout?>(R.id.aspectLayout)?.setAspectRatio(pSize.width, pSize.height)
+        } else {
+            startCamera()
+        }
     }
 
     /** Back <-> front. Going back, return to the lens used last on the back. */
