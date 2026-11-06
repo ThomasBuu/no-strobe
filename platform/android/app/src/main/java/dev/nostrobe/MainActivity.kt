@@ -420,6 +420,9 @@ class MainActivity : AppCompatActivity() {
             camera?.stop(); startCamera()
             return
         }
+        // The lock in force now, with the frame rate it was found at (a dim scene runs at a lower
+        // rate): the recording must use that rate, or the exposure would not fit in the frame.
+        val carriedLock = camera?.carryLock() ?: Triple(0.0, 0.0, 0.0)
         // 1080p keeps the encoder and the lens stream manageable; QUALITY_HIGH can be 4K.
         val p = pickProfile()
         val r = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) MediaRecorder(this) else MediaRecorder()
@@ -439,7 +442,9 @@ class MainActivity : AppCompatActivity() {
         // still overshoots on very noisy footage: measured ~143 Mbit/s in a dark scene.
         // A device with no camcorder profile at all gets plain 720p30.
         val rate = p?.videoBitRate ?: 8_000_000
-        val fps = intent.getIntExtra("rec_fps", 0).takeIf { it > 0 } ?: (p?.videoFrameRate ?: 30)
+        val fps = intent.getIntExtra("rec_fps", 0).takeIf { it > 0 }
+            ?: carriedLock.third.toInt().takeIf { it > 0 }
+            ?: (p?.videoFrameRate ?: 30)
         val vw = p?.videoFrameWidth ?: 1280
         val vh = p?.videoFrameHeight ?: 720
         r.setVideoEncodingBitRate(minOf(rate, MAX_VIDEO_BITRATE))
@@ -457,9 +462,8 @@ class MainActivity : AppCompatActivity() {
         r.setOutputFile(File(externalCacheDir ?: cacheDir, "clip.mp4").path)
         r.prepare()
         recorder = r
-        val (ce, ch) = camera?.carryLock() ?: (0.0 to 0.0)
-        carryExposureUs = ce
-        carryHz = ch
+        carryExposureUs = carriedLock.first
+        carryHz = carriedLock.second
         recordButton.isSelected = true
         val w = java.io.FileWriter(File(externalCacheDir ?: cacheDir, "clip.csv"))
         w.write("timestamp_ns,exposure_ns,iso,luma,state,freq_hz,stale\n")

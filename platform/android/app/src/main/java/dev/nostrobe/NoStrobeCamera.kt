@@ -96,13 +96,14 @@ class NoStrobeCamera(
     /** The lock in force right now (0 when searching), to carry over when the camera is reopened. */
     @Volatile private var lockExposureUs = 0.0
     @Volatile private var lockHz = 0.0
+    @Volatile private var lockFps = 0.0
     @Volatile private var lockAtMs = 0L
 
     /** (exposure us, frequency Hz) of a lock seen in the last seconds, else (0, 0). A status of
      *  "search" is interleaved with "locked" during re-checks, so the instant is not enough. */
-    fun carryLock(): Pair<Double, Double> =
-        if (lockHz > 0.0 && SystemClock.elapsedRealtime() - lockAtMs < LOCK_GRACE_MS) lockExposureUs to lockHz
-        else 0.0 to 0.0
+    fun carryLock(): Triple<Double, Double, Double> =
+        if (lockHz > 0.0 && SystemClock.elapsedRealtime() - lockAtMs < LOCK_GRACE_MS) Triple(lockExposureUs, lockHz, lockFps)
+        else Triple(0.0, 0.0, 0.0)
     // The lens actually pinned by the session that is running (null: the logical camera).
     private var activePhysicalId: String? = null
     private var analysisSurface: Surface? = null
@@ -568,27 +569,39 @@ class NoStrobeCamera(
         try {
             if (autoOnly) return  // nothing to analyse: no manual exposure on this camera
             if (SystemClock.elapsedRealtime() < restUntilMs) return  // auto-exposure rest
-            if (pwmMode && pwm == null) {
-                val limits = currentLimits()
-                lineRateHz = LineProfileExtractor.lineRate(image.height, sustainUs * 1000.0)
-                pwm = NsJni.createPwm(limits, lineRateHz)
-                // Long exposures on a multiple of the period (180 degree shutter) keep the ISO low.
-                // Longer still when the scene is dim enough that the ISO would pass ISO_SOFT_MAX
-                // (up to nearly a full frame): more motion blur, much less noise.
-                val frameUs = 1e6 / (limits.supportedFps.maxOrNull() ?: 30.0)
-                val needUs = if (budgetUsIso > 0.0) budgetUsIso / ISO_SOFT_MAX else 0.0
-                pwm!!.setShutterFraction((needUs / frameUs).coerceIn(SHUTTER_FRACTION, 0.95))
-                if (seedExposureUs > 0.0 && seedHz > 0.0) {
-                    Log.i(TAG, "starting locked: %.0f us at %.1f Hz".format(seedExposureUs, seedHz))
-                    pwm!!.seed(seedExposureUs, seedHz)
-                }
-            }
             // Let the camera's auto-exposure settle first so the brightness budget is known
             // (about one second at 60 fps; the analysis has room for that).
             if (requestedExposureNs == 0L && budgetUsIso == 0.0) {
                 autoWait += 1
                 if (autoWait < 60) return
                 budgetUsIso = latestAutoBudget  // AE never reported CONVERGED: use what we have
+            }
+            // The controller is created once the brightness budget is known: the frame rate and
+            // the shutter it aims for depend on it.
+            if (pwmMode && pwm == null) {
+                val baseLimits = currentLimits()
+                // Dim scene: the exposure is capped by the frame time (a bit under one frame), so
+                // at the highest frame rate the ISO would hit its maximum. Like the phone's own
+                // auto-exposure, use a lower frame rate (not under MIN_DIM_FPS) until the ISO
+                // stays under ISO_SOFT_MAX, or as low as allowed.
+                val needUs = if (budgetUsIso > 0.0) budgetUsIso / ISO_SOFT_MAX else 0.0
+                val fpsChoices = baseLimits.supportedFps.filter { it >= MIN_DIM_FPS }.distinct().sortedDescending()
+                    .ifEmpty { listOf(baseLimits.supportedFps.maxOrNull() ?: 30.0) }
+                val chosenFps = fpsChoices.firstOrNull { (1e6 / it) * 0.95 >= needUs } ?: fpsChoices.last()
+                val limits = baseLimits.copy(supportedFps = doubleArrayOf(chosenFps))
+                Log.i(TAG, "frame rate %.0f for a brightness budget of %.0f (need %.1f ms at ISO %.0f)"
+                    .format(chosenFps, budgetUsIso, needUs / 1000.0, ISO_SOFT_MAX))
+                lineRateHz = LineProfileExtractor.lineRate(image.height, sustainUs * 1000.0)
+                pwm = NsJni.createPwm(limits, lineRateHz)
+                // Long exposures on a multiple of the period (180 degree shutter) keep the ISO low.
+                // Longer still when the scene is dim enough that the ISO would pass ISO_SOFT_MAX
+                // (up to nearly a full frame): more motion blur, much less noise.
+                val frameUs = 1e6 / chosenFps
+                pwm!!.setShutterFraction((needUs / frameUs).coerceIn(SHUTTER_FRACTION, 0.95))
+                if (seedExposureUs > 0.0 && seedHz > 0.0) {
+                    Log.i(TAG, "starting locked: %.0f us at %.1f Hz".format(seedExposureUs, seedHz))
+                    pwm!!.seed(seedExposureUs, seedHz)
+                }
             }
             // The exposure THIS frame was taken with: its own capture result, matched by sensor
             // timestamp. On some devices the result arrives after the image (about 40 % of the
@@ -670,6 +683,7 @@ class NoStrobeCamera(
             if (applied.state == NsJni.STATE_LOCKED && applied.periodUs > 0.0) {
                 lockExposureUs = applied.exposureUs
                 lockHz = 1e6 / applied.periodUs
+                lockFps = applied.fps
                 lockAtMs = SystemClock.elapsedRealtime()
             }
             onStatus(applied)
@@ -775,6 +789,8 @@ class NoStrobeCamera(
         const val LOCK_GRACE_MS = 4_000L
         /** ISO above which a longer exposure is preferred (noise matters more than blur). */
         const val ISO_SOFT_MAX = 3_200.0
+        /** Lowest frame rate the dim-scene rule goes down to (a clip below this is not a video). */
+        const val MIN_DIM_FPS = 24.0
         /** Auto-exposure runs this long before an open-loop recording takes over. */
         const val SEED_METER_MS = 1_500L
     }
