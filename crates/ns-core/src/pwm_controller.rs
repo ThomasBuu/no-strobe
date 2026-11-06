@@ -118,6 +118,8 @@ pub struct PwmController {
     scan_n: usize,
     scan_res: Vec<(f64, f64)>,
     scan_frames: Vec<Vec<f64>>,
+    scan_cands: Vec<f64>,
+    scan_window: Option<(f64, f64)>,
 }
 
 impl PwmController {
@@ -167,6 +169,8 @@ impl PwmController {
             scan_n: 0,
             scan_res: Vec::new(),
             scan_frames: Vec::new(),
+            scan_cands: Vec::new(),
+            scan_window: None,
         }
     }
 
@@ -267,6 +271,7 @@ impl PwmController {
         self.confidence = 0.0;
         self.flicker_seen = false;
         self.trial_profiles.clear();
+        self.scan_window = None;
         self.scan_i = 0;
         self.scan_n = 0;
         self.scan_res.clear();
@@ -309,26 +314,36 @@ impl PwmController {
         // Absolute modulation (relative one times the exposure) is |sin(pi f e)| / (pi f): bounded,
         // and it vanishes only at the nulls (and at e -> 0, an endpoint, never an interior minimum).
         let amp: Vec<f64> = self.scan_res.iter().map(|r| r.1 * r.0).collect();
-        let mut best_e = 0.0;
-        let mut best_ratio = f64::INFINITY;
+        let mut cands: Vec<(f64, f64)> = Vec::new();
         for i in 1..amp.len().saturating_sub(1) {
             let nb = amp[i - 1].max(amp[i + 1]);
-            if amp[i] <= amp[i - 1] && amp[i] <= amp[i + 1] && nb > 0.0 {
-                let ratio = amp[i] / nb;
-                if ratio < best_ratio {
-                    best_ratio = ratio;
-                    best_e = self.scan_res[i].0;
-                }
+            if amp[i] <= amp[i - 1] && amp[i] <= amp[i + 1] && nb > 0.0 && amp[i] / nb < 0.85 {
+                cands.push((amp[i] / nb, self.scan_res[i].0));
             }
         }
-        if self.scan_res.len() < 5 || hi < TEMPORAL_FLOOR || best_ratio > 0.7 {
+        if self.scan_res.len() < 5 || hi < TEMPORAL_FLOOR || cands.is_empty() {
             // Nothing stands out: no flicker, or too dark. Scan again.
             return self.start_blind_sweep();
         }
+        cands.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+        // Best candidate last, so `pop` takes the deepest first; keep at most 4.
+        let skip = cands.len().saturating_sub(4);
+        self.scan_cands = cands.into_iter().skip(skip).map(|c| c.1).collect();
+        self.next_scan_candidate()
+    }
+
+    /// Climb from the next scan minimum, confined to +-25 % so noise cannot drag the climb away
+    /// into the flat region; a candidate that fails verification gives way to the next one.
+    fn next_scan_candidate(&mut self) -> crate::controller::Command {
+        let Some(e) = self.scan_cands.pop() else {
+            self.scan_window = None;
+            return self.start_blind_sweep();
+        };
+        self.scan_window = Some((e / 1.25, e * 1.25));
         self.flicker_seen = true;
         self.confidence = 0.3;
-        self.hill_base = best_e;
-        self.hill_exposure = best_e;
+        self.hill_base = e;
+        self.hill_exposure = e;
         self.hill_step = 1.04;
         self.probe = 0;
         self.probe_res = [0.0; 3];
@@ -510,7 +525,8 @@ impl PwmController {
         if best_idx == 0 {
             self.hill_step = 1.0 + (self.hill_step - 1.0) * 0.6;
         }
-        self.hill_base = best.clamp(self.hill_min(), self.hill_cap());
+        let (wlo, whi) = self.scan_window.unwrap_or((0.0, f64::INFINITY));
+        self.hill_base = best.clamp(self.hill_min(), self.hill_cap()).clamp(wlo, whi);
         self.hill_exposure = self.hill_base;
         if self.rechecking && (self.hill_base / self.best_exposure - 1.0).abs() > 0.15 {
             // The null moved far away: this is no longer the same flicker.
@@ -658,6 +674,7 @@ impl PwmController {
             // The coarse minimum is a real null: this exposure is k / f for some k. The fine
             // climb continues from here, so k is not assumed to be 1.
             self.verify_coarse = false;
+            self.scan_window = None;
             self.f_hz = 1e6 / self.hill_base;
             self.f_from_rows = false;
             self.confidence = 0.5;
@@ -682,6 +699,10 @@ impl PwmController {
                 return self.emit(self.hill_exposure, State::Locked, self.confidence);
             }
             return self.emit(self.best_exposure, State::Locked, self.confidence);
+        }
+        if self.scan_window.is_some() {
+            self.verify_coarse = false;
+            return self.next_scan_candidate();
         }
         // Not a null: forget this frequency and keep climbing from the lower far probe.
         self.verify_coarse = false;
