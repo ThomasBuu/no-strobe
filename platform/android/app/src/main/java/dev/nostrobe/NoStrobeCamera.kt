@@ -78,6 +78,9 @@ class NoStrobeCamera(
     // noisy clip). After PROBE_MS without a lock the camera goes back to auto-exposure for
     // REST_MS, then probes again (the lights may have changed).
     private var surfaceList: List<Surface> = emptyList()
+    // The lens actually pinned by the session that is running (null: the logical camera).
+    private var activePhysicalId: String? = null
+    private var analysisSurface: Surface? = null
     private var probeSinceMs = 0L
     private var restUntilMs = 0L
 
@@ -181,6 +184,9 @@ class NoStrobeCamera(
         val chars = manager.getCameraCharacteristics(physicalId ?: cameraId)
         val limits = Camera2Sync.limitsFromCharacteristics(chars)
         sustainUs = limits.sustainUs
+        Log.i(TAG, "limits: exposure %.0f..%.0f us, sustain %.0f us, iso %.0f..%.0f, fps %s".format(
+            limits.minExposureUs, limits.maxExposureUs, limits.sustainUs, limits.minIso, limits.maxIso,
+            limits.supportedFps.joinToString(",")))
         isoMin = limits.minIso
         isoMax = limits.maxIso
 
@@ -208,6 +214,7 @@ class NoStrobeCamera(
         val r = ImageReader.newInstance(size.width, size.height, ImageFormat.YUV_420_888, 3)
         r.setOnImageAvailableListener({ reader -> onFrame(reader) }, handler)
         reader = r
+        analysisSurface = r.surface
 
         val surfaces = listOf(previewSurface, r.surface) +
             (recorder?.surface?.let { listOf(it) } ?: emptyList())
@@ -345,7 +352,32 @@ class NoStrobeCamera(
         }
     }
 
-    private fun createSession(d: CameraDevice, surfaces: List<Surface>) {
+    /**
+     * Opens the capture session, trying simpler stream combinations when the device refuses
+     * one ("Unsupported set of inputs/outputs"; seen on a Sony Xperia 1 III with preview +
+     * analysis + recorder on a pinned lens):
+     *   0  the requested lens pinned, every stream
+     *   1  the logical camera (the phone picks the lens), every stream
+     *   2  no analysis stream: preview + recorder only, no flicker sync (post-processing)
+     *   3  preview only: the clip cannot be recorded on this device
+     */
+    private fun createSession(d: CameraDevice, all: List<Surface>, level: Int = 0) {
+        if (stopped) return
+        val pin = if (level == 0) physicalId else null
+        activePhysicalId = pin
+        val surfaces = when {
+            level >= 3 -> listOf(previewSurface)
+            level == 2 -> all.filter { it !== analysisSurface }
+            else -> all
+        }
+        if (level >= 2) {
+            autoOnly = true
+            onStatus(unsupportedStatus())
+        }
+        if (level == 1 && physicalId == null) {
+            // Nothing was pinned at level 0, so level 1 would be the same request.
+            createSession(d, all, 2); return
+        }
         val b = d.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW)
         for (s in surfaces) b.addTarget(s)
         applyZoom(b)
@@ -355,18 +387,23 @@ class NoStrobeCamera(
             override fun onConfigured(s: CameraCaptureSession) {
                 session = s
                 s.setRepeatingRequest(b.build(), resultCallback, handler)
-                onReady()
+                if (level < 3) onReady()
             }
 
             override fun onConfigureFailed(s: CameraCaptureSession) {
-                Log.w(TAG, "session configuration failed (physical lens $physicalId)")
+                Log.w(TAG, "session configuration failed at level $level (lens pin $pin): trying a simpler one")
+                if (level < 3 && !stopped) {
+                    try { createSession(d, all, level + 1) } catch (e: Exception) {
+                        Log.w(TAG, "fallback session failed: ${e.message}")
+                    }
+                }
             }
         }
         val executor = java.util.concurrent.Executor { r -> (handler ?: Handler(android.os.Looper.getMainLooper())).post(r) }
-        if (physicalId != null) {
+        if (pin != null) {
             // Streams bound to one physical lens: the phone cannot switch lenses under us.
             val configs = surfaces.map { sf ->
-                OutputConfiguration(sf).also { it.setPhysicalCameraId(physicalId) }
+                OutputConfiguration(sf).also { it.setPhysicalCameraId(pin) }
             }
             d.createCaptureSession(
                 SessionConfiguration(SessionConfiguration.SESSION_REGULAR, configs, executor, callback)
@@ -384,7 +421,7 @@ class NoStrobeCamera(
 
     private fun currentLimits(): NsJni.CameraLimits {
         val base = Camera2Sync.limitsFromCharacteristics(
-            manager.getCameraCharacteristics(physicalId ?: cameraId)
+            manager.getCameraCharacteristics(activePhysicalId ?: cameraId)
         )
         return if (minExposureOverrideUs > base.minExposureUs) {
             base.copy(minExposureUs = minExposureOverrideUs)

@@ -149,12 +149,12 @@ Build the native library:
 
 ```sh
 cargo install cargo-ndk
-rustup target add aarch64-linux-android armv7-linux-androideabi x86_64-linux-android
+rustup target add aarch64-linux-android armv7-linux-androideabi
 export ANDROID_NDK_HOME=$ANDROID_HOME/ndk/<version>
-cargo ndk -t arm64-v8a -t armeabi-v7a -t x86_64 -o platform/android/app/src/main/jniLibs \
+cargo ndk -t arm64-v8a -t armeabi-v7a -o platform/android/app/src/main/jniLibs \
     build -p ns-ffi --release --features android
 # produces libns_ffi.so for each ABI in platform/android/app/src/main/jniLibs/<abi>/
-# (arm64-v8a: current phones, armeabi-v7a: 32-bit devices, x86_64: emulators / ChromeOS)
+# (arm64-v8a: current phones, armeabi-v7a: 32-bit ARM devices; no x86 build, phones only)
 ```
 
 Then the APK (`platform/android`, Gradle 9.5.1 + AGP 9.3.0, verified in this repo):

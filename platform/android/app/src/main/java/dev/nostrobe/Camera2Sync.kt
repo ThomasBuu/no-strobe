@@ -8,6 +8,7 @@ import android.util.Range
 /** Camera2 side: read the sensor limits, then apply the shutter command per frame. */
 object Camera2Sync {
     private const val NS_PER_US = 1000L
+    private const val MIN_SANE_EXPOSURE_US = 20.0
 
     fun supportsManualSensor(chars: CameraCharacteristics): Boolean {
         val caps = chars.get(CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES) ?: return false
@@ -39,7 +40,8 @@ object Camera2Sync {
             ?: doubleArrayOf(30.0)
 
         return CameraLimits(
-            minExposureUs = exposureRange.lower / NS_PER_US.toDouble(),
+            // Some devices advertise a minimum of ~0 ns: no sensor exposes less than a few row times.
+            minExposureUs = maxOf(exposureRange.lower / NS_PER_US.toDouble(), MIN_SANE_EXPOSURE_US),
             maxExposureUs = exposureRange.upper / NS_PER_US.toDouble(),
             sustainUs = (sustain?.toLong() ?: 0L) / NS_PER_US.toDouble(),
             supportedFps = fps,
