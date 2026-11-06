@@ -57,6 +57,8 @@ class NoStrobeCamera(
     private var last: NsCommand? = null
     private var sustainUs = 0.0
     private var lineRateHz = 0.0
+    /** Row readout rate in rows/s, 0 when the device does not publish it. */
+    val rowRateHz: Double get() = lineRateHz
     private var handler: Handler? = null
     private var analysisThread: HandlerThread? = null
 

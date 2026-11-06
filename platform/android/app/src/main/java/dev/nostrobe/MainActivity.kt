@@ -20,6 +20,10 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import java.io.File
+import android.content.ContentValues
+import android.net.Uri
+import android.os.Environment
+import android.provider.MediaStore
 import kotlin.math.ln
 import kotlin.math.min
 import kotlin.math.pow
@@ -40,6 +44,10 @@ class MainActivity : AppCompatActivity() {
     private lateinit var recordButton: android.view.View
     private lateinit var lensRow: android.widget.LinearLayout
     private lateinit var flipButton: Button
+    private lateinit var postButton: Button
+    // The last clip recorded (in the cache) and the row rate it was shot with.
+    private var lastClip: File? = null
+    private var lastRowRate = 0.0
     private lateinit var zoomBar: SeekBar
     private lateinit var zoomText: TextView
     private lateinit var exposureBar: SeekBar
@@ -79,6 +87,8 @@ class MainActivity : AppCompatActivity() {
         zoomBar = findViewById(R.id.zoom)
         zoomText = findViewById(R.id.zoomText)
         flipButton.setOnClickListener { flipCamera() }
+        postButton = findViewById(R.id.post)
+        postButton.setOnClickListener { showPostMenu() }
         exposureBar = findViewById(R.id.exposureBar)
         exposureText = findViewById(R.id.exposureText)
         exposureBar.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
@@ -330,12 +340,14 @@ class MainActivity : AppCompatActivity() {
     private fun toggleRecord() {
         if (recorder != null) {
             val (total, locked) = camera?.recordingStats() ?: (0 to 0)
+            lastRowRate = camera?.rowRateHz ?: 0.0
             camera?.closeMeta()
             try { recorder?.stop() } catch (e: RuntimeException) {
                 android.util.Log.w("nostrobe", "recorder stopped without data: ${e.message}")
             }
             recorder?.release(); recorder = null
             recordButton.isSelected = false
+            finishClip()
             notifyPost(total, locked)
             camera?.stop(); startCamera()
             return
@@ -370,6 +382,128 @@ class MainActivity : AppCompatActivity() {
         // The recorder surface is added by the session, so rebuild it; the recorder starts
         // once the session is configured (MediaRecorder needs frames to flow to its surface).
         camera?.stop(); startCamera()
+    }
+
+    /** The clip is in the cache; copy it to Movies/no-strobe so the gallery sees it. */
+    private fun finishClip() {
+        val clip = File(externalCacheDir ?: cacheDir, "clip.mp4")
+        if (!clip.exists() || clip.length() == 0L) return
+        lastClip = clip
+        postButton.visibility = android.view.View.VISIBLE
+        val name = "nostrobe-" + java.text.SimpleDateFormat("yyyyMMdd-HHmmss", java.util.Locale.US)
+            .format(java.util.Date()) + ".mp4"
+        Thread {
+            val where = saveToGallery(clip, name)
+            runOnUiThread {
+                Toast.makeText(this, if (where != null) "Saved: $where" else "Could not save the clip to the gallery",
+                    Toast.LENGTH_LONG).show()
+            }
+        }.start()
+    }
+
+    /** Movies/no-strobe through MediaStore (no permission needed from Android 10). */
+    private fun saveToGallery(src: File, displayName: String): String? {
+        return try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                val values = ContentValues().apply {
+                    put(MediaStore.Video.Media.DISPLAY_NAME, displayName)
+                    put(MediaStore.Video.Media.MIME_TYPE, "video/mp4")
+                    put(MediaStore.Video.Media.RELATIVE_PATH, Environment.DIRECTORY_MOVIES + "/no-strobe")
+                    put(MediaStore.Video.Media.IS_PENDING, 1)
+                }
+                val uri: Uri = contentResolver.insert(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, values) ?: return null
+                contentResolver.openOutputStream(uri)?.use { o -> src.inputStream().use { it.copyTo(o) } }
+                values.clear()
+                values.put(MediaStore.Video.Media.IS_PENDING, 0)
+                contentResolver.update(uri, values, null, null)
+                "Movies/no-strobe/$displayName"
+            } else {
+                // Before Android 10 a shared-storage write needs a runtime permission: keep the
+                // copy in the app's own movies folder instead.
+                val dir = getExternalFilesDir(Environment.DIRECTORY_MOVIES) ?: filesDir
+                src.copyTo(File(dir, displayName), overwrite = true).path
+            }
+        } catch (e: Exception) {
+            android.util.Log.w("nostrobe", "gallery save failed: ${e.message}")
+            null
+        }
+    }
+
+    private fun prefs() = getSharedPreferences("nostrobe", MODE_PRIVATE)
+
+    private fun showPostMenu() {
+        val items = arrayOf("Send to the desktop and fix", "Desktop server settings")
+        androidx.appcompat.app.AlertDialog.Builder(this)
+            .setTitle("Post-process the last clip")
+            .setItems(items) { _, which ->
+                if (which == 0) sendToDesktop() else showServerSettings()
+            }
+            .show()
+    }
+
+    private fun showServerSettings() {
+        val pad = (16 * resources.displayMetrics.density).toInt()
+        val box = android.widget.LinearLayout(this).apply {
+            orientation = android.widget.LinearLayout.VERTICAL
+            setPadding(pad, pad, pad, 0)
+        }
+        val url = android.widget.EditText(this).apply {
+            hint = "http://192.168.1.20:8765"
+            setText(prefs().getString("post_url", ""))
+            setSingleLine()
+        }
+        val token = android.widget.EditText(this).apply {
+            hint = "token (NO_STROBE_TOKEN on the computer)"
+            setText(prefs().getString("post_token", ""))
+            setSingleLine()
+        }
+        box.addView(url); box.addView(token)
+        androidx.appcompat.app.AlertDialog.Builder(this)
+            .setTitle("Desktop server")
+            .setMessage("Run: no-strobe-post serve --listen 0.0.0.0:8765 --token ...")
+            .setView(box)
+            .setPositiveButton("Save") { _, _ ->
+                prefs().edit().putString("post_url", url.text.toString().trim())
+                    .putString("post_token", token.text.toString().trim()).apply()
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    private fun sendToDesktop() {
+        val clip = lastClip
+        if (clip == null || !clip.exists()) {
+            Toast.makeText(this, "No clip to process yet.", Toast.LENGTH_SHORT).show(); return
+        }
+        val base = prefs().getString("post_url", "") ?: ""
+        if (base.isBlank()) { showServerSettings(); return }
+        val token = prefs().getString("post_token", "") ?: ""
+        val out = File(clip.parentFile, "clip-fixed.mp4")
+        postButton.isEnabled = false
+        val rate = lastRowRate
+        Thread {
+            try {
+                DesktopPost.send(clip, out, base, token, rate) { pct ->
+                    runOnUiThread { status.text = "post-processing on the desktop: $pct %" }
+                }
+                val name = "nostrobe-" + java.text.SimpleDateFormat("yyyyMMdd-HHmmss", java.util.Locale.US)
+                    .format(java.util.Date()) + "-fixed.mp4"
+                val where = saveToGallery(out, name)
+                runOnUiThread {
+                    status.text = "post-processing done"
+                    Toast.makeText(this, if (where != null) "Fixed clip saved: $where" else "Fixed clip ready",
+                        Toast.LENGTH_LONG).show()
+                }
+            } catch (e: Exception) {
+                android.util.Log.w("nostrobe", "desktop post failed: ${e.message}")
+                runOnUiThread {
+                    status.text = "post-processing failed"
+                    Toast.makeText(this, "Desktop post-processing failed: ${e.message}", Toast.LENGTH_LONG).show()
+                }
+            } finally {
+                runOnUiThread { postButton.isEnabled = true }
+            }
+        }.start()
     }
 
     /** Live correction is not available (MediaRecorder), so say when post-processing is needed. */

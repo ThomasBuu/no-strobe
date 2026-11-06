@@ -39,6 +39,13 @@
             android:orientation="horizontal" />
 
         <Button
+            android:id="@+id/post"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="post"
+            android:visibility="gone" />
+
+        <Button
             android:id="@+id/flip"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"

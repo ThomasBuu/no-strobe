@@ -60,9 +60,11 @@ fn probe(input: &Path) -> Result<Probe, String> {
 
 fn decoder(input: &Path) -> Result<std::process::Child, String> {
     Command::new("ffmpeg")
+        // passthrough: phone clips are variable frame rate, and ffmpeg would otherwise
+        // duplicate frames to a constant rate (663 frames out of 88 on a real clip).
         .args(["-v", "error", "-noautorotate", "-i"])
         .arg(input)
-        .args(["-an", "-f", "rawvideo", "-pix_fmt", "gray", "-"])
+        .args(["-an", "-fps_mode", "passthrough", "-f", "rawvideo", "-pix_fmt", "gray", "-"])
         .stdout(Stdio::piped())
         .spawn()
         .map_err(|e| format!("cannot run ffmpeg: {e}"))
@@ -146,6 +148,8 @@ pub fn fix(input: &Path, output: &Path, line_rate_hz: f64, log: &mut dyn FnMut(&
         idx += 1;
     }
     drop(enc_in);
+    // Drain the decoder so it ends cleanly instead of failing on a closed pipe.
+    while read_frame(&mut out, &mut buf).unwrap_or(false) {}
     let _ = dec.wait();
     let st = enc.wait().map_err(|e| format!("ffmpeg: {e}"))?;
     if !st.success() {
