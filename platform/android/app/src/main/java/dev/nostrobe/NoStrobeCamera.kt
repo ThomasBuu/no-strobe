@@ -161,6 +161,18 @@ class NoStrobeCamera(
     private var autoSettled = false
     private var isoMin = 100.0
     private var isoMax = 6400.0
+    private var recordingWarmupFrames = 0
+    private var seedApplied = false
+    private var readyCalled = false
+    private var hsSession: CameraConstrainedHighSpeedCaptureSession? = null
+
+    private fun triggerRecorderStart() {
+        if (readyCalled || stopped) return
+        readyCalled = true
+        Log.i(TAG, "recorder start triggered after warmup (%d frames)".format(recordingWarmupFrames))
+        onReady()
+    }
+
     private val resultCallback = object : CameraCaptureSession.CaptureCallback() {
         override fun onCaptureCompleted(
             session: CameraCaptureSession,
@@ -181,6 +193,29 @@ class NoStrobeCamera(
                     CaptureResult.CONTROL_AF_STATE_FOCUSED_LOCKED -> Log.i(TAG, "focus: locked")
                     CaptureResult.CONTROL_AF_STATE_NOT_FOCUSED_LOCKED -> Log.i(TAG, "focus: could not lock")
                     else -> Log.d(TAG, "af state $af")
+                }
+            }
+            if (recorder != null && !readyCalled) {
+                recordingWarmupFrames++
+                if (seedExposureUs > 0.0 && seedHz > 0.0) {
+                    val threshold = if (highSpeedFps > 0) 8 else 3
+                    if (!seedApplied && recordingWarmupFrames >= threshold) {
+                        seedApplied = true
+                        val hs = hsSession
+                        if (hs != null) {
+                            applySeededHighSpeed(hs)
+                        } else {
+                            applySeededExposure()
+                        }
+                    }
+                    val startThreshold = if (highSpeedFps > 0) 14 else 5
+                    if (seedApplied && recordingWarmupFrames >= startThreshold) {
+                        triggerRecorderStart()
+                    }
+                } else {
+                    if (recordingWarmupFrames >= 3) {
+                        triggerRecorderStart()
+                    }
                 }
             }
             val ts = result.get(CaptureResult.SENSOR_TIMESTAMP) ?: return
@@ -388,12 +423,15 @@ class NoStrobeCamera(
         val chars = manager.getCameraCharacteristics(cameraId)
         val active = chars.get(CameraCharacteristics.SENSOR_INFO_ACTIVE_ARRAY_SIZE) ?: return
         val orientation = chars.get(CameraCharacteristics.SENSOR_ORIENTATION) ?: 90
-        val (sx, sy) = when (orientation) {
+        val front = chars.get(CameraCharacteristics.LENS_FACING) == CameraCharacteristics.LENS_FACING_FRONT
+        val (rawSx, rawSy) = when (orientation) {
             90 -> ny to (1f - nx)
             270 -> (1f - ny) to nx
             180 -> (1f - nx) to (1f - ny)
             else -> nx to ny
         }
+        val sx = if (front) 1f - rawSx else rawSx
+        val sy = rawSy
         // What the user sees is the zoom crop, centred on the active array.
         val z = zoomRatio.coerceAtLeast(0.1f)
         val cw = active.width() / z
@@ -407,9 +445,13 @@ class NoStrobeCamera(
             (px + half).toInt().coerceIn(active.left + 1, active.right),
             (py + half).toInt().coerceIn(active.top + 1, active.bottom),
         )
-        b.set(CaptureRequest.CONTROL_AF_REGIONS, arrayOf(MeteringRectangle(rect, MeteringRectangle.METERING_WEIGHT_MAX - 1)))
+        val maxAf = chars.get(CameraCharacteristics.CONTROL_MAX_REGIONS_AF) ?: 0
+        if (maxAf > 0) {
+            b.set(CaptureRequest.CONTROL_AF_REGIONS, arrayOf(MeteringRectangle(rect, MeteringRectangle.METERING_WEIGHT_MAX - 1)))
+        }
         b.set(CaptureRequest.CONTROL_AF_MODE, CameraMetadata.CONTROL_AF_MODE_AUTO)
         b.set(CaptureRequest.CONTROL_AF_TRIGGER, CameraMetadata.CONTROL_AF_TRIGGER_START)
+        Log.i(TAG, "tap to focus at (%.2f, %.2f) -> sensor rect %s".format(nx, ny, rect))
         try {
             sess.capture(b.build(), focusCallback, handler)
             // The trigger is one-shot: the held request must not carry it again.
@@ -424,9 +466,15 @@ class NoStrobeCamera(
 
     private val resumeContinuousFocus = Runnable {
         val b = builder ?: return@Runnable
+        val sess = session ?: return@Runnable
         b.set(CaptureRequest.CONTROL_AF_MODE, CameraMetadata.CONTROL_AF_MODE_CONTINUOUS_VIDEO)
         b.set(CaptureRequest.CONTROL_AF_REGIONS, null)
-        try { session?.setRepeatingRequest(b.build(), resultCallback, handler) } catch (_: Exception) {}
+        b.set(CaptureRequest.CONTROL_AF_TRIGGER, CameraMetadata.CONTROL_AF_TRIGGER_CANCEL)
+        try {
+            sess.capture(b.build(), null, handler)
+            b.set(CaptureRequest.CONTROL_AF_TRIGGER, CameraMetadata.CONTROL_AF_TRIGGER_IDLE)
+            sess.setRepeatingRequest(b.build(), resultCallback, handler)
+        } catch (_: Exception) {}
     }
 
     private val focusCallback = object : CameraCaptureSession.CaptureCallback() {
@@ -478,10 +526,10 @@ class NoStrobeCamera(
                     for (t in surfaces) b.addTarget(t)
                     b.set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, android.util.Range(highSpeedFps, highSpeedFps))
                     builder = b
+                    hsSession = hs
                     hs.setRepeatingBurst(hs.createHighSpeedRequestList(b.build()), resultCallback, handler)
                     Log.i(TAG, "high-speed session at $highSpeedFps fps")
-                    onReady()
-                    handler?.postDelayed({ applySeededHighSpeed(hs) }, SEED_METER_MS)
+                    handler?.postDelayed({ triggerRecorderStart() }, 1500L)
                 } catch (e: Exception) {
                     Log.w(TAG, "high-speed start failed (${e.message}): normal session")
                     createSession(d, fallbackSurfaces, 2)
@@ -555,10 +603,10 @@ class NoStrobeCamera(
             override fun onConfigured(s: CameraCaptureSession) {
                 session = s
                 s.setRepeatingRequest(b.build(), resultCallback, handler)
-                if (level < 3) onReady()
-                // Recording without the analysis stream: apply the lock found before as is.
-                if (level >= 2 && seedExposureUs > 0.0 && seedHz > 0.0) {
-                    handler?.postDelayed({ applySeededExposure() }, SEED_METER_MS)
+                if (recorder == null) {
+                    if (level < 3) onReady()
+                } else {
+                    handler?.postDelayed({ triggerRecorderStart() }, 1500L)
                 }
             }
 
@@ -925,6 +973,10 @@ class NoStrobeCamera(
         restUntilMs = 0L
         mismatchRun = 0
         lastActualNs = 0L
+        recordingWarmupFrames = 0
+        seedApplied = false
+        readyCalled = false
+        hsSession = null
     }
 
     private companion object {
