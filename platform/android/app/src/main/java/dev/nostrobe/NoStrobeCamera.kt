@@ -781,6 +781,9 @@ class NoStrobeCamera(
                     .format(chosenFps, budgetUsIso, needUs / 1000.0, ISO_SOFT_MAX))
                 lineRateHz = LineProfileExtractor.lineRate(image.height, sustainUs * 1000.0)
                 pwm = NsJni.createPwm(limits, lineRateHz)
+                val chars = manager.getCameraCharacteristics(activePhysicalId ?: cameraId)
+                val pipelineDepth = (chars.get(CameraCharacteristics.REQUEST_PIPELINE_MAX_DEPTH)?.toInt() ?: 2).toDouble()
+                pwm!!.setPipelineDepth(pipelineDepth)
                 // Long exposures on a multiple of the period (180 degree shutter) keep the ISO low.
                 // Longer still when the scene is dim enough that the ISO would pass ISO_SOFT_MAX
                 // (up to nearly a full frame): more motion blur, much less noise.

@@ -323,6 +323,29 @@ pub extern "system" fn Java_dev_nostrobe_NsJni_nativeSetShutterFraction(
     ctrl.set_shutter_fraction(fraction);
 }
 
+/// Sets the hardware camera pipeline depth in frames (CameraCharacteristics.REQUEST_PIPELINE_MAX_DEPTH).
+#[no_mangle]
+pub extern "system" fn Java_dev_nostrobe_NsJni_nativeSetPipelineDepth(
+    _env: JNIEnv,
+    _class: JClass,
+    handle: jlong,
+    depth: jdouble,
+) {
+    let ctrl = unsafe { &mut *(handle as *mut PwmController) };
+    ctrl.set_pipeline_depth(depth);
+}
+
+/// Predicts the lead flicker phase in radians compensated for camera pipeline depth.
+#[no_mangle]
+pub extern "system" fn Java_dev_nostrobe_NsJni_nativePredictLeadPhase(
+    _env: JNIEnv,
+    _class: JClass,
+    handle: jlong,
+) -> jdouble {
+    let ctrl = unsafe { &*(handle as *const PwmController) };
+    ctrl.lead_phase_rad().unwrap_or(0.0)
+}
+
 
 /// Native SIMD-accelerated mean luminance of a plane from a direct ByteBuffer.
 #[no_mangle]

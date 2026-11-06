@@ -332,7 +332,7 @@ fn noisy_blind_sweep_never_locks_on_a_false_minimum() {
         let mut c = PwmController::new(phone_limits(), 0.0);
         let mut seed = seed0;
         let mut phase = 0.0;
-        let mut noisy = |e: f64, phase: f64, seed: &mut u64| -> Vec<f64> {
+        let noisy = |e: f64, phase: f64, seed: &mut u64| -> Vec<f64> {
             profile_for(e, f_hz, phase, 0.3, LINE_RATE, ROWS)
                 .into_iter()
                 .map(|v| v + noise(seed, 0.006))

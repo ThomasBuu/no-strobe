@@ -170,3 +170,12 @@ pub unsafe extern "C" fn ns_on_profile(
 pub unsafe extern "C" fn ns_destroy_pwm(handle: *mut PwmController) {
     drop(Box::from_raw(handle));
 }
+
+/// Sets the hardware camera pipeline depth in frames.
+///
+/// # Safety
+/// `handle` must come from `ns_create_pwm`.
+#[no_mangle]
+pub unsafe extern "C" fn ns_set_pipeline_depth(handle: *mut PwmController, depth: f64) {
+    (*handle).set_pipeline_depth(depth);
+}

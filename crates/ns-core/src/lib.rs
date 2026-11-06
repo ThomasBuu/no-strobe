@@ -1,6 +1,7 @@
 pub mod camera;
 pub mod controller;
 pub mod detector;
+pub mod pll;
 pub mod profile;
 pub mod pwm;
 pub mod pwm_controller;

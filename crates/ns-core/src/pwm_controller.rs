@@ -127,6 +127,12 @@ pub struct PwmController {
     scan_window: Option<(f64, f64)>,
     /// Flicker frequency estimated from the spacing of the scan nulls (0 while searching).
     f_est_hz: f64,
+    /// Software PLL for phase tracking and Camera2 pipeline latency compensation.
+    pll: Option<crate::pll::FlickerPll>,
+    /// Hardware camera pipeline depth in frames (CameraCharacteristics.REQUEST_PIPELINE_MAX_DEPTH).
+    pipeline_depth: f64,
+    /// Cumulative frame counter.
+    total_frames: u64,
 }
 
 impl PwmController {
@@ -181,6 +187,9 @@ impl PwmController {
             scan_cands: Vec::new(),
             scan_window: None,
             f_est_hz: 0.0,
+            pll: None,
+            pipeline_depth: 2.0,
+            total_frames: 0,
         }
     }
 
@@ -192,7 +201,41 @@ impl PwmController {
         }
     }
 
+    pub fn set_pipeline_depth(&mut self, depth: f64) {
+        self.pipeline_depth = depth.clamp(0.0, 5.0);
+        if let Some(ref mut pll) = self.pll {
+            pll.set_pipeline_depth(self.pipeline_depth);
+        }
+    }
+
+    pub fn pipeline_depth(&self) -> f64 {
+        self.pipeline_depth
+    }
+
+    pub fn pll(&self) -> Option<&crate::pll::FlickerPll> {
+        self.pll.as_ref()
+    }
+
+    pub fn lead_phase_rad(&self) -> Option<f64> {
+        let pll = self.pll.as_ref()?;
+        let frame_us = 1e6 / self.fps;
+        Some(pll.predict_lead_phase(frame_us))
+    }
+
+    pub fn phase_rad(&self) -> Option<f64> {
+        self.pll.as_ref().map(|p| p.phase_rad())
+    }
+
+    pub fn pll_confidence(&self) -> f64 {
+        self.pll.as_ref().map(|p| p.confidence()).unwrap_or(0.0)
+    }
+
     pub fn frequency_hz(&self) -> f64 {
+        if let Some(ref pll) = self.pll {
+            if pll.confidence() > 0.35 {
+                return pll.frequency_hz();
+            }
+        }
         // The row measurement is the period itself. The spacing of the scan nulls is a guess, and
         // it breaks when the deepest scan candidates are short-exposure noise minima: measured at
         // 100 Hz, locked at 10000 us (k=1), the median spacing of the four candidates gave 5714 Hz.
@@ -338,10 +381,15 @@ impl PwmController {
         self.rechecking = false;
         self.frames_since_check = 0;
         self.phase = Phase::Locked;
+        let mut pll = crate::pll::FlickerPll::default();
+        pll.set_pipeline_depth(self.pipeline_depth);
+        pll.init(f_hz, 0.0, self.total_frames as f64 * (1e6 / self.fps));
+        self.pll = Some(pll);
     }
 
     /// Feed one frame's vertical luminance profile, get the exposure to apply.
     pub fn on_profile(&mut self, profile: &[f64]) -> crate::controller::Command {
+        self.total_frames = self.total_frames.wrapping_add(1);
         if self.profiles.len() >= PROFILE_KEEP {
             self.profiles.remove(0);
         }
@@ -508,11 +556,43 @@ impl PwmController {
     }
 
     fn search(&mut self, profile: &[f64]) -> crate::controller::Command {
-        if self.profiles.len() < PROFILE_KEEP {
-            return self.emit(self.min_exp(), State::Search, 0.0);
-        }
-        let mean = self.mean_profile();
+        let prev = if self.profiles.len() >= 2 {
+            Some(self.profiles[self.profiles.len() - 2].as_slice())
+        } else {
+            None
+        };
+
         if self.line_rate_hz > 0.0 {
+            // Instant spatial/differential convergence: test profile immediately without 8-frame delay
+            if let Some((f, conf)) = pwm::robust_estimate_f(profile, prev, self.line_rate_hz, MIN_HZ, MAX_HZ) {
+                if conf >= 0.3 {
+                    self.f_hz = f;
+                    self.confidence = conf;
+                    self.f_from_rows = true;
+                    self.flicker_seen = true;
+                    let mut pll = crate::pll::FlickerPll::default();
+                    pll.set_pipeline_depth(self.pipeline_depth);
+                    let p_rows = self.line_rate_hz / f;
+                    let phase = crate::pll::measure_profile_phase(profile, p_rows).unwrap_or(0.0);
+                    pll.init(f, phase, self.total_frames as f64 * (1e6 / self.fps));
+                    self.pll = Some(pll);
+
+                    if let Some(e) = self.begin_hill() {
+                        if conf >= 0.5 {
+                            self.best_exposure = e;
+                            self.best_residual = 0.02;
+                            self.phase = Phase::Locked;
+                            self.frames_since_check = 0;
+                            return self.emit(e, State::Locked, self.confidence);
+                        }
+                        return self.emit(e, State::Search, self.confidence);
+                    }
+                }
+            }
+            if self.profiles.len() < PROFILE_KEEP {
+                return self.emit(self.min_exp(), State::Search, 0.0);
+            }
+            let mean = self.mean_profile();
             if let Some((f, conf)) = pwm::estimate_f(&mean, self.line_rate_hz, MIN_HZ, MAX_HZ) {
                 self.f_hz = f;
                 self.confidence = conf;
@@ -536,7 +616,15 @@ impl PwmController {
         // well at a fraction of the true period (the bright pulse overlaps itself), and the
         // controller then locks on a flicker that is three times too fast.
         let max_rows = rows / 3.0;
-        if let Some((p, conf)) = pwm::estimate_period_rows(profile, min_rows, max_rows) {
+
+        let period_res = if self.line_rate_hz > 0.0 {
+            pwm::robust_period_rows(profile, prev, min_rows, max_rows)
+                .or_else(|| pwm::estimate_period_rows(profile, min_rows, max_rows))
+        } else {
+            pwm::estimate_period_rows(profile, min_rows, max_rows)
+        };
+
+        if let Some((p, conf)) = period_res {
             self.period_rows = p;
             self.period_conf = conf;
             if conf > 0.3 && pwm::banding_amplitude(profile) > NOISE_FLOOR {
@@ -545,6 +633,12 @@ impl PwmController {
                 self.confidence = conf;
                 self.flicker_seen = true;
                 self.search_frames = 0;
+                let mut pll = crate::pll::FlickerPll::default();
+                pll.set_pipeline_depth(self.pipeline_depth);
+                let phase = crate::pll::measure_profile_phase(profile, p).unwrap_or(0.0);
+                pll.init(self.f_hz, phase, 0.0);
+                self.pll = Some(pll);
+
                 if let Some(e) = self.begin_hill() {
                     return self.emit(e, State::Search, self.confidence);
                 }
@@ -703,9 +797,38 @@ impl PwmController {
     }
 
     fn locked(&mut self, profile: &[f64]) -> crate::controller::Command {
-        let residual = pwm::banding_amplitude(profile);
+        let residual = if self.profiles.len() >= 2 {
+            let p1 = &self.profiles[self.profiles.len() - 1];
+            let p0 = &self.profiles[self.profiles.len() - 2];
+            let diff: f64 = p1
+                .iter()
+                .zip(p0.iter())
+                .map(|(&a, &b)| (a - b).abs() / (0.5 * (a + b) + 0.01))
+                .sum();
+            (diff / p1.len().max(1) as f64).min(pwm::banding_amplitude(profile))
+        } else {
+            pwm::banding_amplitude(profile)
+        };
         self.residual_last = residual;
         self.frames_since_check += 1;
+
+        if let Some(ref mut pll) = self.pll {
+            let p_rows = if self.line_rate_hz > 0.0 && self.f_hz > 0.0 {
+                self.line_rate_hz / self.f_hz
+            } else if self.period_rows > 0.0 {
+                self.period_rows
+            } else {
+                0.0
+            };
+            if p_rows > 1.0 {
+                if let Some(meas_phase) = crate::pll::measure_profile_phase(profile, p_rows) {
+                    let t_us = self.total_frames as f64 * (1e6 / self.fps);
+                    let quality = (1.0 - (residual / 0.05).clamp(0.0, 1.0)).max(0.1);
+                    pll.update(meas_phase, t_us, quality);
+                }
+            }
+        }
+
         let stale = self.frames_since_check >= CHECK_FRAMES;
         let degraded = residual > self.best_residual * (1.0 + RESIDUAL_TOLERANCE)
             && residual > NOISE_FLOOR;
@@ -952,6 +1075,18 @@ impl PwmController {
         self.last_exposure = exposure_us;
         let iso = (self.limits.min_iso * (self.limits.max_exposure_us / exposure_us.max(1.0)))
             .clamp(self.limits.min_iso, self.limits.max_iso);
+        let drift_us_per_frame = if self.f_hz > 0.0 && self.fps > 0.0 {
+            let frame_us = 1e6 / self.fps;
+            let t_flicker = 1e6 / self.f_hz;
+            let drift = frame_us.rem_euclid(t_flicker);
+            if drift > 0.5 * t_flicker {
+                drift - t_flicker
+            } else {
+                drift
+            }
+        } else {
+            0.0
+        };
         crate::controller::Command {
             exposure_us,
             fps: self.fps,
@@ -960,7 +1095,7 @@ impl PwmController {
             state,
             period_us: if self.f_hz > 0.0 { 1e6 / self.f_hz } else { 0.0 },
             confidence,
-            drift_us_per_frame: 0.0,
+            drift_us_per_frame,
         }
     }
 }

@@ -194,6 +194,199 @@ pub fn exposure_for_k(f_hz: f64, k: u32) -> f64 {
     1e6 * k as f64 / f_hz
 }
 
+/// Pre-filters a profile using 2nd-order discrete Laplacian and MAD outlier clipping,
+/// completely eliminating constant DC and linear illumination gradients across the scene.
+pub fn filter_profile_for_flicker(profile: &[f64], prev_profile: Option<&[f64]>) -> Vec<f64> {
+    let n = profile.len();
+    if n < 8 {
+        return profile.to_vec();
+    }
+
+    let base: Vec<f64> = if let Some(prev) = prev_profile {
+        if prev.len() == n {
+            profile
+                .iter()
+                .zip(prev.iter())
+                .map(|(&c, &p)| {
+                    let denom = 0.5 * (c + p) + 0.01;
+                    (c - p) / denom
+                })
+                .collect()
+        } else {
+            profile.to_vec()
+        }
+    } else {
+        profile.to_vec()
+    };
+
+    // 2nd-difference discrete Laplacian: d2[i] = base[i+1] - 2*base[i] + base[i-1]
+    let mut d2 = vec![0.0f64; n];
+    for i in 1..n - 1 {
+        d2[i] = base[i + 1] - 2.0 * base[i] + base[i - 1];
+    }
+    d2[0] = d2[1];
+    d2[n - 1] = d2[n - 2];
+
+    // Robust Winsorization (clip isolated spikes from scene edges)
+    let mut abs_vals: Vec<f64> = d2.iter().map(|v| v.abs()).collect();
+    abs_vals.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let median_abs = abs_vals[n / 2];
+    let clip = (3.5 * median_abs).max(1e-5);
+    for v in d2.iter_mut() {
+        *v = v.clamp(-clip, clip);
+    }
+
+    // Re-center after clipping to guarantee zero DC offset
+    let mean_clipped = d2.iter().sum::<f64>() / n as f64;
+    for v in d2.iter_mut() {
+        *v -= mean_clipped;
+    }
+
+    d2
+}
+
+/// Robust banding period estimation from vertical luminance profile.
+/// Uses 2nd difference filtering and Pearson correlation to reject static scene structure.
+pub fn robust_period_rows(
+    profile: &[f64],
+    prev_profile: Option<&[f64]>,
+    min_rows: f64,
+    max_rows: f64,
+) -> Option<(f64, f64)> {
+    let x = filter_profile_for_flicker(profile, prev_profile);
+    let n = x.len();
+    if n < 16 {
+        return None;
+    }
+
+    let lo = (min_rows.ceil() as usize).max(2);
+    let hi = (max_rows.floor() as usize).min(n / 2);
+    if lo >= hi {
+        return None;
+    }
+
+    let energy: f64 = x.iter().map(|v| v * v).sum();
+    if energy <= 1e-12 {
+        return None;
+    }
+
+    // Pearson normalized cross-correlation
+    let mut c = Vec::with_capacity(hi - lo + 1);
+    for lag in lo..=hi {
+        let count = n - lag;
+        let mut sum_x = 0.0;
+        let mut sum_y = 0.0;
+        for i in 0..count {
+            sum_x += x[i];
+            sum_y += x[i + lag];
+        }
+        let mx = sum_x / count as f64;
+        let my = sum_y / count as f64;
+
+        let mut s_xy = 0.0;
+        let mut s_xx = 0.0;
+        let mut s_yy = 0.0;
+        for i in 0..count {
+            let xi = x[i] - mx;
+            let yi = x[i + lag] - my;
+            s_xy += xi * yi;
+            s_xx += xi * xi;
+            s_yy += yi * yi;
+        }
+        let denom = (s_xx * s_yy).sqrt();
+        let r = if denom > 1e-12 { s_xy / denom } else { 0.0 };
+        c.push(r);
+    }
+
+    if c.len() < 3 {
+        return None;
+    }
+
+    let mut trough = None;
+    for (i, &r) in c.iter().enumerate() {
+        if r < 0.0 {
+            trough = Some(i);
+            break;
+        }
+    }
+    let start = match trough {
+        Some(i) => i + 1,
+        None => return None,
+    };
+
+    let mut peak = None;
+    for i in start.max(1)..c.len() - 1 {
+        if c[i] >= 0.35 && c[i] >= c[i - 1] && c[i] >= c[i + 1] {
+            let lag_cand = lo + i;
+            let half = lag_cand / 2;
+            if half >= 1 {
+                let count = n - half;
+                let mut sum_x = 0.0;
+                let mut sum_y = 0.0;
+                for j in 0..count {
+                    sum_x += x[j];
+                    sum_y += x[j + half];
+                }
+                let mx = sum_x / count as f64;
+                let my = sum_y / count as f64;
+
+                let mut s_xy = 0.0;
+                let mut s_xx = 0.0;
+                let mut s_yy = 0.0;
+                for j in 0..count {
+                    let xi = x[j] - mx;
+                    let yi = x[j + half] - my;
+                    s_xy += xi * yi;
+                    s_xx += xi * xi;
+                    s_yy += yi * yi;
+                }
+                let denom = (s_xx * s_yy).sqrt();
+                let c_half = if denom > 1e-12 { s_xy / denom } else { 0.0 };
+                // A real period has a trough at half its length (c(T/2) <= 0.25 * c(T)),
+                // rejecting sub-harmonics like 2T whose half-period is T where c is maximal.
+                if c_half <= 0.25 * c[i] {
+                    peak = Some(i);
+                    break;
+                }
+            }
+        }
+    }
+
+    let idx = peak?;
+    let best_c = c[idx];
+
+    let left = if idx > 0 { c[idx - 1] } else { best_c };
+    let right = if idx + 1 < c.len() { c[idx + 1] } else { best_c };
+    let denom = left - 2.0 * best_c + right;
+    let shift = if denom.abs() > 1e-12 { ((left - right) / (2.0 * denom)).clamp(-0.8, 0.8) } else { 0.0 };
+
+    let p = ((lo + idx) as f64 + shift).clamp(lo as f64, hi as f64);
+    Some((p, best_c))
+}
+
+/// Robust frequency estimation from vertical luminance profile and sensor line rate.
+pub fn robust_estimate_f(
+    profile: &[f64],
+    prev_profile: Option<&[f64]>,
+    line_rate_hz: f64,
+    min_hz: f64,
+    max_hz: f64,
+) -> Option<(f64, f64)> {
+    if line_rate_hz <= 0.0 {
+        return None;
+    }
+    let min_rows = (line_rate_hz / max_hz).max(2.0);
+    let max_rows = (line_rate_hz / min_hz).min(profile.len() as f64 - 2.0);
+    if min_rows >= max_rows {
+        return None;
+    }
+    let (p, conf) = robust_period_rows(profile, prev_profile, min_rows, max_rows)?;
+    if p <= 0.0 {
+        return None;
+    }
+    Some((line_rate_hz / p, conf))
+}
+
 /// Smallest `k` whose exposure fits the device range and the frame period.
 pub fn pick_k(f_hz: f64, limits: &crate::camera::CameraLimits, fps: f64) -> Option<(u32, f64)> {
     let frame_us = 1e6 / fps;

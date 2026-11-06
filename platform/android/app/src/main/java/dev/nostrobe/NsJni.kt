@@ -66,6 +66,8 @@ object NsJni {
     private external fun nativeSetShutterFraction(handle: Long, fraction: Double)
     private external fun nativeSetMinExposure(handle: Long, us: Double)
     private external fun nativeSetMaxExposure(handle: Long, us: Double)
+    private external fun nativeSetPipelineDepth(handle: Long, depth: Double)
+    private external fun nativePredictLeadPhase(handle: Long): Double
     private external fun nativeSyntheticProfile(
         exposureUs: Double, fHz: Double, phaseCycles: Double, duty: Double, lineRateHz: Double, rows: Int,
     ): DoubleArray
@@ -256,6 +258,14 @@ object NsJni {
         fun setMaxExposure(us: Double) {
             nativeSetMaxExposure(handle, us)
         }
+
+        /** Camera hardware pipeline depth in frames (CameraCharacteristics.REQUEST_PIPELINE_MAX_DEPTH). */
+        fun setPipelineDepth(depth: Double) {
+            nativeSetPipelineDepth(handle, depth)
+        }
+
+        /** Predicts lead flicker phase in radians compensated for camera pipeline depth. */
+        fun predictLeadPhase(): Double = nativePredictLeadPhase(handle)
 
         /** Start locked on a flicker found earlier, instead of searching again. */
         fun seed(exposureUs: Double, fHz: Double) {
